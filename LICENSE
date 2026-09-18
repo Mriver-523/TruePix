@@ -1,0 +1,72 @@
+TruePix Repository — Multi-License Notice
+=========================================
+
+This repository aggregates several components under different open-source
+licenses. There is no single license that covers every file. The authoritative
+full license text for each component is the LICENSE file in that component's
+directory (and, for Apache-2.0 components, any accompanying NOTICE).
+
+Provenance of the TruePix core
+------------------------------
+
+The protocol implementation under `TruePix-main/` (and the video-editing front-end
+under `VideoEdition/`) is the main contribution of this project. It is a
+derivative work of the Hyrax interactive-proof codebase
+(https://github.com/hyraxZK), substantially modified and extended for
+verifiable video editing (TruePix).
+
+Under Apache-2.0:
+
+- Copyright in the original Hyrax material remains with the Hyrax authors
+  (see notices below and in vendored Hyrax-derived components).
+- Copyright in TruePix-specific modifications and new code belongs to the
+  TruePix authors.
+
+Retain both copyright lines when you redistribute those trees. A short
+attribution also appears in `NOTICE`.
+
+Component summary
+-----------------
+
+1. TruePix core (`TruePix-main/`, excluding vendored third-party trees under
+   `TruePix-main/Orion/*/include/`) and `VideoEdition/`
+   Apache License 2.0 — full text: `TruePix-main/LICENSE`
+   Copyright (c) 2017 Riad S. Wahby and the Hyrax authors (original Hyrax code)
+   Copyright (c) 2025–2026 the TruePix authors (modifications and new code)
+   Replace "the TruePix authors" with your legal name or organization if desired.
+
+2. libpws (`libpws/`)
+   Apache License 2.0 — see `libpws/LICENSE`
+   Copyright 2017 Riad S. Wahby and the Hyrax authors
+
+3. pylaurent (`pylaurent/`)
+   Apache License 2.0 — see `pylaurent/LICENSE`
+   Copyright 2017 Riad S. Wahby and the Hyrax authors
+
+4. pymiracl (`pymiracl/`)
+   GNU Affero General Public License v3.0 (AGPL-3.0) — see `pymiracl/LICENSE`
+   Copyright 2018 Riad S. Wahby and the Hyrax authors
+
+   IMPORTANT: This repository includes and is designed to link against
+   AGPL-3.0-licensed pymiracl. Redistributing a combined work that
+   incorporates pymiracl, or providing a modified version as a network
+   service, may trigger AGPL-3.0 obligations (including corresponding
+   source disclosure). Review AGPL-3.0 carefully before redistributing
+   or deploying.
+
+5. Orion (`TruePix-main/Orion/Orion_zk/`, `TruePix-main/Orion/Orion_nonzk/`)
+   Apache License 2.0 — see the LICENSE files in those directories
+   Vendored dependencies under `include/` (for example XKCP and
+   flo-shani-aesni) retain their upstream licenses; see LICENSE files
+   in those subtrees.
+
+6. Elliptic-curve parameter files (`pymiracl/lib/`)
+   Apache License 2.0 — see `pymiracl/lib/LICENSE`
+
+If you use only a subset of this repository, you need only comply with the
+licenses of the components you use. If you redistribute the repository as a
+whole, you must satisfy all applicable component licenses, including AGPL-3.0
+for pymiracl.
+
+This software is intended for research and evaluation. See each component
+LICENSE for warranty disclaimers and the full terms.
