@@ -1,0 +1,1 @@
+SUBDIRS = miracl pymiracl tests

@@ -1,0 +1,6 @@
+ffmpeg-python
+numpy
+h5py
+tqdm
+ecdsa
+

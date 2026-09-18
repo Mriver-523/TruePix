@@ -1,0 +1,29 @@
+#!/bin/bash
+
+MDOUT=$(./ecsgen ../../lib/m159.ecs <<< 123456789 | md5sum | cut -d \  -f 1)
+
+if [ ${MDOUT} != "afa248cc53d630ce82937d133fe9f774" ]; then
+    echo "ERROR: m159 output mismatches."
+    exit 1
+fi
+
+MDOUT=$(./ecsgen ../../lib/m191.ecs <<< 123456789 | md5sum | cut -d \  -f 1)
+
+if [ ${MDOUT} != "9a7f0cb53220ac0589230d9c6f503f87" ]; then
+    echo "ERROR: m191 output mismatches."
+    exit 1
+fi
+
+MDOUT=$(./ecsgen ../../lib/m221.ecs <<< 123456789 | md5sum | cut -d \  -f 1)
+
+if [ ${MDOUT} != "bdc79cdc5a24ee43e71d04a0f2436a09" ]; then
+    echo "ERROR: m221 output mismatches."
+    exit 1
+fi
+
+MDOUT=$(./ecsgen ../../lib/m255.ecs <<< 123456789 | md5sum | cut -d \  -f 1)
+
+if [ ${MDOUT} != "049c347739cd38edd6693609ea553656" ]; then
+    echo "ERROR: m255 output mismatches."
+    exit 1
+fi

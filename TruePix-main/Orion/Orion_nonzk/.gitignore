@@ -1,0 +1,46 @@
+# Generated build trees (do not ignore source Makefiles / CMakeLists.txt)
+build/*
+build_tp/
+CMakeFiles/*
+*.cmake
+
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Runtime / scratch text — keep CMakeLists.txt tracked
+*.txt
+!CMakeLists.txt
+!**/CMakeLists.txt
+*.pws
+zk_proof
+gen
