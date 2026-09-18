@@ -1,8 +1,8 @@
 #!/usr/bin/python
 #
 # Copyright 2017 Riad S. Wahby and the Hyrax authors
-# Copyright 2025-2026 the TruePix authors
-# Licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+# Copyright 2026 the TruePix authors
+# Licensed under the Apache License, Version 2.0
 #
 # libTruePix — TruePix protocol library (Hyrax-derived)
 

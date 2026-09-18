@@ -1,7 +1,4 @@
 #!/usr/bin/python
-#
-
-
 
 from libTruePix.defs import Defs
 import libTruePix.util
