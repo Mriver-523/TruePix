@@ -12,7 +12,7 @@ import sys
 import subprocess
 
 from libTruePix import attest
-from libTruePix.fp2_link import infer_gkr_input_layout, orion_binary, orion_env
+from libTruePix.fp2_link import cpu_pin, infer_gkr_input_layout, orion_binary, orion_env
 
 
 def print_section_header(title):
@@ -29,8 +29,7 @@ def run_truepix(constraint_size, usezk, pws_file=None):
     # Commit publishes orion_commit.json (layout + Merkle root(s)).
     # ZK: masked + mask polynomials. Non-ZK: a single polynomial.
     copy_size, const_idx, const_val = infer_gkr_input_layout(pws_file)
-    cmd = [
-        "taskset", "-c", "1",
+    cmd = cpu_pin() + [
         orion_binary("commit", usezk == 1),
         str(constraint_size),
         "0",  # shared input.txt is mandatory

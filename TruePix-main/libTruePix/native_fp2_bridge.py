@@ -1,9 +1,10 @@
 #!/usr/bin/python3
 """
-ctypes bridge to Orion-backed native_fp2 batch kernels.
+ctypes bridge to native_fp2 batch kernels.
 
-Fp2Buf keeps coordinates in contiguous C buffers so fold/sumcheck
-avoid repeated Python object allocation.
+The CPU library is Orion-backed. When ENABLE_GPU is true and a CUDA device
+is present, hot kernels and the early-round session use libnative_fp2_gpu.so.
+Otherwise every call stays on the existing CPU library.
 """
 
 from __future__ import annotations
@@ -14,28 +15,21 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 from libTruePix.extfield import BASE_PRIME_61, Fp2, _raw
 
+# Set False to force the existing CPU path even when a GPU is available.
+ENABLE_GPU = True
+
 _LIB = None
+_GPU_LIB = None
 AVAILABLE = False
+GPU_ACTIVE = False
 
 _U64 = ctypes.c_uint64
 _I32 = ctypes.c_int
 _SIZE = ctypes.c_size_t
+_VOID_P = ctypes.c_void_p
 
 
-def _load():
-    global _LIB, AVAILABLE
-    here = os.path.dirname(os.path.realpath(__file__))
-    cand = os.path.normpath(os.path.join(here, "..", "native_fp2", "lib", "libnative_fp2.so"))
-    if not os.path.isfile(cand):
-        AVAILABLE = False
-        return
-    lib = ctypes.CDLL(cand)
-    lib.native_fp2_init.restype = ctypes.c_int
-    lib.native_fp2_init.argtypes = []
-    if lib.native_fp2_init() != 0:
-        AVAILABLE = False
-        return
-
+def _bind_batch(lib) -> None:
     lib.native_fp2_fold.restype = None
     lib.native_fp2_fold.argtypes = [
         ctypes.POINTER(_U64), ctypes.POINTER(_U64), _SIZE,
@@ -73,11 +67,87 @@ def _load():
         ctypes.POINTER(_U64), ctypes.POINTER(_U64), _I32,
         ctypes.POINTER(_U64), ctypes.POINTER(_U64),
     ]
+
+
+def _bind_early(lib) -> None:
+    lib.native_fp2_early_create.restype = _VOID_P
+    lib.native_fp2_early_create.argtypes = [
+        _I32,
+        ctypes.POINTER(_I32), ctypes.POINTER(_I32), ctypes.POINTER(_I32),
+        ctypes.POINTER(_U64), ctypes.POINTER(_U64),
+        _I32, _I32,
+        ctypes.POINTER(_U64), ctypes.POINTER(_U64),
+        ctypes.POINTER(_U64), ctypes.POINTER(_U64),
+    ]
+    lib.native_fp2_early_claim.restype = ctypes.c_int
+    lib.native_fp2_early_claim.argtypes = [_VOID_P, ctypes.POINTER(_U64)]
+    lib.native_fp2_early_fold.restype = ctypes.c_int
+    lib.native_fp2_early_fold.argtypes = [_VOID_P, _U64, _U64]
+    lib.native_fp2_early_finish.restype = ctypes.c_int
+    lib.native_fp2_early_finish.argtypes = [
+        _VOID_P,
+        ctypes.POINTER(_U64), ctypes.POINTER(_U64),
+        ctypes.POINTER(_U64), ctypes.POINTER(_U64),
+    ]
+    lib.native_fp2_early_n_copies.restype = ctypes.c_int
+    lib.native_fp2_early_n_copies.argtypes = [_VOID_P]
+    lib.native_fp2_early_n_wires.restype = ctypes.c_int
+    lib.native_fp2_early_n_wires.argtypes = [_VOID_P]
+    lib.native_fp2_early_destroy.restype = None
+    lib.native_fp2_early_destroy.argtypes = [_VOID_P]
+
+
+def _load():
+    global _LIB, _GPU_LIB, AVAILABLE, GPU_ACTIVE
+    here = os.path.dirname(os.path.realpath(__file__))
+    libdir = os.path.normpath(os.path.join(here, "..", "native_fp2", "lib"))
+    cpu_path = os.path.join(libdir, "libnative_fp2.so")
+    if not os.path.isfile(cpu_path):
+        AVAILABLE = False
+        return
+    lib = ctypes.CDLL(cpu_path)
+    lib.native_fp2_init.restype = ctypes.c_int
+    lib.native_fp2_init.argtypes = []
+    if lib.native_fp2_init() != 0:
+        AVAILABLE = False
+        return
+    _bind_batch(lib)
     _LIB = lib
     AVAILABLE = True
 
+    if not ENABLE_GPU:
+        return
+    gpu_path = os.path.join(libdir, "libnative_fp2_gpu.so")
+    if not os.path.isfile(gpu_path):
+        return
+    try:
+        gpu = ctypes.CDLL(gpu_path)
+    except OSError:
+        return
+    gpu.native_fp2_init.restype = ctypes.c_int
+    gpu.native_fp2_init.argtypes = []
+    if not hasattr(gpu, "native_fp2_cuda_available") or not hasattr(gpu, "native_fp2_early_create"):
+        return
+    gpu.native_fp2_cuda_available.restype = ctypes.c_int
+    gpu.native_fp2_cuda_available.argtypes = []
+    if gpu.native_fp2_init() != 0 or not gpu.native_fp2_cuda_available():
+        return
+    _bind_batch(gpu)
+    _bind_early(gpu)
+    _GPU_LIB = gpu
+    _LIB = gpu
+    GPU_ACTIVE = True
+
 
 _load()
+
+
+def cuda_available() -> bool:
+    return GPU_ACTIVE
+
+
+def early_session_supported() -> bool:
+    return GPU_ACTIVE and _GPU_LIB is not None
 
 
 class Fp2Buf:
@@ -237,6 +307,103 @@ def sumcheck_early(
         _raw(out8[4], out8[5], p),
         _raw(out8[6], out8[7], p),
     ]
+
+
+class EarlySession:
+    """Resident early-round GKR session. Used only when a CUDA device is active."""
+
+    __slots__ = ("_handle", "_n_wires")
+
+    def __init__(self, handle, n_wires: int):
+        self._handle = handle
+        self._n_wires = int(n_wires)
+
+    @property
+    def n_copies(self) -> int:
+        return int(_GPU_LIB.native_fp2_early_n_copies(self._handle))
+
+    @property
+    def n_wires(self) -> int:
+        return self._n_wires
+
+    def claim(self) -> List[Fp2]:
+        out8 = (_U64 * 8)()
+        if _GPU_LIB.native_fp2_early_claim(self._handle, out8) != 0:
+            raise RuntimeError("native_fp2_early_claim failed")
+        p = BASE_PRIME_61
+        return [
+            _raw(out8[0], out8[1], p),
+            _raw(out8[2], out8[3], p),
+            _raw(out8[4], out8[5], p),
+            _raw(out8[6], out8[7], p),
+        ]
+
+    def fold(self, challenge) -> None:
+        chal = _as_fp2_challenge(challenge)
+        if _GPU_LIB.native_fp2_early_fold(self._handle, _U64(chal.real), _U64(chal.imag)) != 0:
+            raise RuntimeError("native_fp2_early_fold failed")
+
+    def finish(self) -> Tuple[List[Fp2], Fp2]:
+        n = self._n_wires
+        wr = (_U64 * n)()
+        wi = (_U64 * n)()
+        br = _U64()
+        bi = _U64()
+        if _GPU_LIB.native_fp2_early_finish(
+            self._handle, wr, wi, ctypes.byref(br), ctypes.byref(bi)
+        ) != 0:
+            raise RuntimeError("native_fp2_early_finish failed")
+        p = BASE_PRIME_61
+        wires = [_raw(wr[i], wi[i], p) for i in range(n)]
+        return wires, _raw(br.value, bi.value, p)
+
+    def destroy(self) -> None:
+        if self._handle:
+            _GPU_LIB.native_fp2_early_destroy(self._handle)
+            self._handle = None
+
+    def __del__(self):
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+def early_session_create(
+    gate_type: Sequence[int],
+    in0: Sequence[int],
+    in1: Sequence[int],
+    z1: Sequence,
+    n_copies: int,
+    n_wires: int,
+    values: Sequence,
+    beta: Sequence,
+) -> EarlySession:
+    if not early_session_supported():
+        raise RuntimeError("native_fp2 early session API not available")
+    n_gates = len(gate_type)
+    p = BASE_PRIME_61
+    gt = (_I32 * n_gates)(*gate_type)
+    i0a = (_I32 * n_gates)(*in0)
+    i1a = (_I32 * n_gates)(*in1)
+    z1r = (_U64 * n_gates)()
+    z1i = (_U64 * n_gates)()
+    for g, z in enumerate(z1):
+        if type(z) is Fp2:
+            z1r[g] = z.real
+            z1i[g] = z.imag
+        else:
+            z1r[g] = int(z) % p
+    vr, vi = _pack_wire_rows(values, n_wires, n_copies)
+    br, bi, _ = _coords_from_values(beta)
+    handle = _GPU_LIB.native_fp2_early_create(
+        _I32(n_gates), gt, i0a, i1a, z1r, z1i,
+        _I32(n_copies), _I32(n_wires),
+        vr, vi, br, bi,
+    )
+    if not handle:
+        raise RuntimeError("native_fp2_early_create failed")
+    return EarlySession(handle, n_wires)
 
 
 def resolve_gate_type_idx(gate) -> int:

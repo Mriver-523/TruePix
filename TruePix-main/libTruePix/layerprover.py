@@ -68,11 +68,52 @@ class LayerProver(object):
         assert len(self.circuit.muxbits) >= muxlen, "Expected %d muxbits, found %d" % (muxlen, len(self.circuit.muxbits))
         # Cached for native early sumcheck (rebuilt lazily if needed).
         self._native_gate_tables = None
+        # Resident early-round session. Created only when GPU acceleration is active.
+        self._early_session = None
+
+    def _destroy_early_session(self):
+        sess = getattr(self, "_early_session", None)
+        if sess is not None:
+            sess.destroy()
+            self._early_session = None
+
+    def _maybe_start_early_session(self):
+        """Upload values/beta/gates once when a CUDA device is active."""
+        if self._early_session is not None:
+            return True
+        if (
+            _native_fp2 is None
+            or not getattr(_native_fp2, "GPU_ACTIVE", False)
+            or not _native_fp2.early_session_supported()
+            or not self.gates
+            or type(self.gates[0].accum_z1) is not Fp2
+        ):
+            return False
+        n_copies = len(self.compute_beta.outputs)
+        n_wires = len(self.compute_v)
+        if n_copies < 2:
+            return False
+        if self._native_gate_tables is None:
+            self._native_gate_tables = _native_fp2.cache_gate_tables(self.gates)
+        gate_type, in0, in1 = self._native_gate_tables
+        z1 = [g.accum_z1 for g in self.gates]
+        values = [cv.outputs for cv in self.compute_v]
+        try:
+            self._early_session = _native_fp2.early_session_create(
+                gate_type, in0, in1, z1,
+                n_copies, n_wires,
+                values, self.compute_beta.outputs,
+            )
+        except RuntimeError:
+            self._early_session = None
+            return False
+        return True
 
     # set new inputs
     def set_inputs(self, inputs):
         assert len(inputs) == self.circuit.nCopies, "Got inputs for the wrong #copies"
         self.inputs = inputs
+        self._destroy_early_session()
         for inX in range(0, 2 ** self.nInBits):
             # transpose input matrix
             inXVals = [ inCopy[inX] for inCopy in inputs ]
@@ -81,6 +122,7 @@ class LayerProver(object):
     # set a new z vector
     def set_z(self, z1, z2, z1_2, muls, project_line):
         self.roundNum = 0
+        self._destroy_early_session()
         self.compute_beta.set_inputs(z2)
         if z1_2 is not None:
             self.compute_z1chi = VerifierIOMLExt.compute_beta(z1, self.circuit.comp_chi, muls[0])
@@ -110,6 +152,16 @@ class LayerProver(object):
             inEarlyRounds = False
 
         if inEarlyRounds:
+            # GPU resident session when a device is present; otherwise the existing path.
+            if self._maybe_start_early_session():
+                outs = self._early_session.claim()
+                if self.circuit.comp_out:
+                    n_pairs = self._early_session.n_copies // 2
+                    self.circuit.comp_out.did_add(n_pairs * (4 * len(self.gates) + 4))
+                    self.circuit.comp_out.did_mul(n_pairs * (4 * len(self.gates) + 4))
+                self.output = util.interpolate_cubic(outs, self.circuit.comp_out)
+                return
+
             # Orion-backed batch early sumcheck when challenges are Fp2.
             use_native = (
                 _native_fp2 is not None
@@ -199,22 +251,32 @@ class LayerProver(object):
         # do beta and V updates
         if self.roundNum < self.circuit.nCopyBits:
             inLateRounds = False
-            self.compute_beta.next_round(val)
-            for cv in self.compute_v:
-                cv.next_round(val)
-            # no gate updates in early rounds: gate circuits don't update state
+            if self._early_session is not None:
+                self._early_session.fold(val)
+                if self.roundNum == self.circuit.nCopyBits - 1:
+                    wires, beta_prev = self._early_session.finish()
+                    for i, cv in enumerate(self.compute_v):
+                        cv.prevPassValue = wires[i]
+                    self.compute_beta.prevPassValue = beta_prev
+                    self.compute_v_final.set_inputs(wires)
+                    for g in self.gates:
+                        g.set_early(False)
+                        g.set_z()
+                    self._destroy_early_session()
+            else:
+                self.compute_beta.next_round(val)
+                for cv in self.compute_v:
+                    cv.next_round(val)
+                # no gate updates in early rounds: gate circuits don't update state
 
-        # gotta do some juggling now that we're done with the w3 updates
-        if self.roundNum == self.circuit.nCopyBits - 1:
-            # set up compute_v_final with prevPassValues from the per-input compute_v instances
-            inputs = [ cv.prevPassValue for cv in self.compute_v ]
-            assert all( elm is not None for elm in inputs )
-            self.compute_v_final.set_inputs(inputs)
+                if self.roundNum == self.circuit.nCopyBits - 1:
+                    inputs = [ cv.prevPassValue for cv in self.compute_v ]
+                    assert all( elm is not None for elm in inputs )
+                    self.compute_v_final.set_inputs(inputs)
 
-            # prepare gates for final rounds
-            for g in self.gates:
-                g.set_early(False)
-                g.set_z()
+                    for g in self.gates:
+                        g.set_early(False)
+                        g.set_z()
 
         # updating w1 or w2, which requires updating compute_v_final and the gates
         if inLateRounds:

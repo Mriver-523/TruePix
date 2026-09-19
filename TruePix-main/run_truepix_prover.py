@@ -374,6 +374,7 @@ def run_truepix(verifier_info):
     # random mask and a random opening point, so it neither committed to
     # nor opened the polynomial the rest of the protocol talks about.
     from libTruePix.fp2_link import (
+        cpu_pin,
         infer_gkr_input_layout,
         orion_binary,
         orion_env,
@@ -392,8 +393,7 @@ def run_truepix(verifier_info):
     env = orion_env(copy_size, const_idx, const_val)
     env["TRUEPIX_GKR_POINT_FILE"] = os.path.abspath(point_file)
 
-    cmd = [
-        "taskset", "-c", "1",
+    cmd = cpu_pin() + [
         orion_binary("prove", VerifierInfo.usezk == 1),
         str(VerifierInfo.nCopies),
         "0",  # shared input.txt is mandatory

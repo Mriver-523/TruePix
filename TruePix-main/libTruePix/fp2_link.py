@@ -455,7 +455,7 @@ def run_orion_open_with_point(
     env["TRUEPIX_ORION_RESULT_FILE"] = os.path.abspath(result_file)
 
     # Pin to one CPU like legacy run_truepix_verifier for comparable timing.
-    cmd = ["taskset", "-c", "1", binary, str(n_copies), str(userandom)]
+    cmd = cpu_pin() + [binary, str(n_copies), str(userandom)]
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -481,6 +481,16 @@ def run_orion_open_with_point(
     # status as well as the result file; require both to agree.
     result.ok = bool(result.ok) and proc.returncode == 0
     return result
+
+
+def cpu_pin() -> List[str]:
+    """Prefix that pins a child to one core.
+
+    TRUEPIX_CPU selects the core. The default is 1, matching the legacy
+    single-thread timing runs. Multi-thread random mode sets one core per worker.
+    """
+    cpu = os.environ.get("TRUEPIX_CPU", "1")
+    return ["taskset", "-c", str(cpu)]
 
 
 def orion_binary(phase: str, use_zk: bool) -> str:

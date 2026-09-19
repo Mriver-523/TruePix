@@ -44,6 +44,9 @@ usage() {
     echo "  --constraint <size>       Constraint size for TruePix proofs (default: auto-calculated)"
     echo "  --crop <x1> <x2> <y1> <y2> Crop coordinates 0-1 (for crop operation)"
     echo "  --random                  Use random input for testing (skip video editing)"
+    echo "  --frames <N>              Random mode only: total frames (with --threads)"
+    echo "  --threads <T>             Random mode only: worker threads, one core each"
+    echo "                            Each thread runs n=frames/threads times"
     echo "  --zk                      Enable full ZK (GKR product-mask + Orion mask/masked; default)"
     echo "  --no-zk                   Disable ZK (plain GKR VOLE + Orion single polynomial)"
     echo "  --help                    Show this help message"
@@ -52,6 +55,7 @@ usage() {
     echo "  $0 --input input.mp4 --operation gray --zk"
     echo "  $0 --input input.mp4 --operation crop --crop 0.2 0.8 0.2 0.8"
     echo "  $0 --random --operation gray --constraint 1350"
+    echo "  $0 --random --operation gray --constraint 1350 --frames 8 --threads 4"
 }
 
 get_pws_file() {
@@ -154,6 +158,168 @@ PY
     return 0
 }
 
+link_worker_bins() {
+    local dir=$1
+    mkdir -p "$dir"
+    local name
+    for name in fft_gkr \
+        linearPC_multi_commit linearPC_multi_prove linearPC_multi_open \
+        linearPC_multi_commit_zk linearPC_multi_prove_zk linearPC_multi_open_zk
+    do
+        if [ -e "$TRUEPIX_ROOT/$name" ]; then
+            ln -sfn "$TRUEPIX_ROOT/$name" "$dir/$name"
+        fi
+    done
+}
+
+run_random_once() {
+    local pws_file=$1
+    local constraint_size=$2
+    local use_zk=$3
+    local z_flag
+    if [ "$use_zk" = "1" ]; then
+        z_flag="1"
+    else
+        z_flag="2"
+    fi
+
+    rm -f input.txt output.txt hyraxproof \
+        orion_commit.json orion_mask_seed.txt \
+        signature.bin public_key.pem \
+        gkr_point.json gkr_point.txt \
+        gkr_point_prover.json gkr_point_prover.txt \
+        orion_open_result.json orion_open_result_e2e.json \
+        vole_prover_*.json vole_verifier_*.json \
+        vole_ext_prover_*.json vole_ext_verifier_*.json
+
+    echo "=== Preparing shared random input/output ==="
+    if ! PYTHONPATH="$TRUEPIX_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<PY
+from libTruePix.defs import Defs
+from libTruePix.fp2_link import prepare_random_circuit_io
+Defs.configure()
+info = prepare_random_circuit_io("$pws_file", int("$constraint_size"))
+print("Prepared random IO:", info)
+PY
+    then
+        echo "Error: failed to prepare shared random input/output"
+        return 1
+    fi
+
+    if ! python3 "$TRUEPIX_ROOT/run_truepix_signer.py" -c "$constraint_size" -z "$use_zk" --pws "$pws_file"; then
+        echo "Error: TruePix Signer failed"
+        return 1
+    fi
+    if ! python3 "$TRUEPIX_ROOT/run_truepix_prover.py" -p "$pws_file" -c="$constraint_size" -z "$z_flag" -o "hyraxproof" -i "input.txt"; then
+        echo "Error: TruePix Prover failed"
+        return 1
+    fi
+    if ! python3 "$TRUEPIX_ROOT/run_truepix_verifier.py" -p "$pws_file" -c="$constraint_size" -z "$z_flag" -v "hyraxproof" -i "input.txt"; then
+        echo "Error: TruePix Verifier failed"
+        return 1
+    fi
+    return 0
+}
+
+multithread_worker() {
+    local i
+    for ((i = 1; i <= N_PER_THREAD; i++)); do
+        echo "=== cpu ${TRUEPIX_CPU} run ${i}/${N_PER_THREAD} ==="
+        if ! run_random_once "$PWS_ABS" "$CONSTRAINT_SIZE" "$USE_ZK"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+sum_metric() {
+    # $1 log file, $2 metric label. Prints "sum count".
+    awk -F: -v label="$2" '
+        index($1, label) == 1 {
+            gsub(/seconds/, "", $2)
+            sum += $2
+            n++
+        }
+        END { printf "%.6f %d\n", sum + 0, n + 0 }
+    ' "$1"
+}
+
+run_random_multithread() {
+    local frames=$1
+    local threads=$2
+    local n_per=$((frames / threads))
+    local ncpu
+    ncpu=$(nproc 2>/dev/null || echo 1)
+    local stamp
+    stamp=$(date +%Y%m%d_%H%M%S)
+    local outdir="$TRUEPIX_ROOT/mt_random_${stamp}"
+    local pws_abs="$TRUEPIX_ROOT/$PWS_PATH"
+
+    echo "=== Random multi-thread mode ==="
+    echo "Frames: $frames  Threads: $threads  Runs per thread (n): $n_per"
+    echo "Host CPUs: $ncpu  Logs: $outdir"
+    if [ "$threads" -gt "$ncpu" ]; then
+        echo "Warning: threads ($threads) exceeds CPUs ($ncpu); extra workers share cores"
+    fi
+
+    mkdir -p "$outdir"
+    export TRUEPIX_ROOT PWS_ABS="$pws_abs" CONSTRAINT_SIZE USE_ZK N_PER_THREAD="$n_per"
+    export -f run_random_once multithread_worker
+
+    local -a pids=()
+    local -a logs=()
+    local -a cpus=()
+    local t cpu log
+    for ((t = 0; t < threads; t++)); do
+        cpu=$((t % ncpu))
+        log="$outdir/thread_${t}.log"
+        link_worker_bins "$outdir/thread_${t}"
+        logs+=("$log")
+        cpus+=("$cpu")
+        TRUEPIX_CPU="$cpu" taskset -c "$cpu" bash -c \
+            'cd "$1" || exit 1; export TRUEPIX_CPU="$2"; multithread_worker' \
+            _ "$outdir/thread_${t}" "$cpu" >"$log" 2>&1 &
+        pids+=("$!")
+    done
+
+    local fail=0
+    local pid
+    for pid in "${pids[@]}"; do
+        if ! wait "$pid"; then
+            fail=1
+        fi
+    done
+
+    echo
+    echo "Per-thread sums over n=${n_per} runs (not summed across threads):"
+    printf "%-8s %-6s %-22s %-22s %-22s\n" "thread" "cpu" "TOTAL Signing Time" "TOTAL Prove Time" "TOTAL Verify Time"
+    for ((t = 0; t < threads; t++)); do
+        local sign_line prove_line verify_line
+        sign_line=$(sum_metric "${logs[$t]}" "TOTAL Signing Time")
+        prove_line=$(sum_metric "${logs[$t]}" "TOTAL Prove Time")
+        verify_line=$(sum_metric "${logs[$t]}" "TOTAL Verify Time")
+        local sign_sum sign_n prove_sum prove_n verify_sum verify_n
+        read -r sign_sum sign_n <<<"$sign_line"
+        read -r prove_sum prove_n <<<"$prove_line"
+        read -r verify_sum verify_n <<<"$verify_line"
+        printf "%-8s %-6s %-22s %-22s %-22s\n" \
+            "$t" "${cpus[$t]}" \
+            "${sign_sum}s (n=${sign_n})" \
+            "${prove_sum}s (n=${prove_n})" \
+            "${verify_sum}s (n=${verify_n})"
+        if [ "$sign_n" -ne "$n_per" ] || [ "$prove_n" -ne "$n_per" ] || [ "$verify_n" -ne "$n_per" ]; then
+            echo "Thread $t: expected ${n_per} samples of each metric, see ${logs[$t]}"
+            fail=1
+        fi
+    done
+
+    if [ "$fail" -ne 0 ]; then
+        echo "Multi-thread random run failed. Logs: $outdir"
+        return 1
+    fi
+    echo "Multi-thread random run completed. Logs: $outdir"
+    return 0
+}
+
 run_video_editing() {
     local input_video=$1
     local output_video=$2
@@ -215,6 +381,8 @@ CONSTRAINT_SIZE=""
 CROP_COORDS=""
 USE_RANDOM=0
 USE_ZK=""
+FRAMES=""
+THREADS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -247,6 +415,14 @@ while [[ $# -gt 0 ]]; do
         --random)
             USE_RANDOM=1
             shift
+            ;;
+        --frames)
+            FRAMES="$2"
+            shift 2
+            ;;
+        --threads)
+            THREADS="$2"
+            shift 2
             ;;
         --zk)
             USE_ZK=1
@@ -337,6 +513,39 @@ if ! [[ "$CONSTRAINT_SIZE" =~ ^[0-9]+$ ]] || [ "$CONSTRAINT_SIZE" -le 0 ]; then
 fi
 
 echo "Using constraint size: $CONSTRAINT_SIZE"
+
+if [ -n "$FRAMES" ] || [ -n "$THREADS" ]; then
+    if [ "$USE_RANDOM" -ne 1 ]; then
+        echo "Error: --frames and --threads are only valid with --random"
+        usage
+        exit 1
+    fi
+    if [ -z "$FRAMES" ] || [ -z "$THREADS" ]; then
+        echo "Error: --frames and --threads must be set together"
+        usage
+        exit 1
+    fi
+    if ! [[ "$FRAMES" =~ ^[0-9]+$ ]] || ! [[ "$THREADS" =~ ^[0-9]+$ ]] \
+        || [ "$FRAMES" -le 0 ] || [ "$THREADS" -le 0 ]; then
+        echo "Error: --frames and --threads must be positive integers"
+        usage
+        exit 1
+    fi
+    if [ $((FRAMES % THREADS)) -ne 0 ]; then
+        echo "Error: total frames ($FRAMES) must be divisible by threads ($THREADS)"
+        usage
+        exit 1
+    fi
+    run_random_multithread "$FRAMES" "$THREADS"
+    mt_status=$?
+    if [ "$mt_status" -eq 0 ]; then
+        echo "TruePix processing completed successfully!"
+    else
+        echo "TruePix processing failed!"
+        exit 1
+    fi
+    exit 0
+fi
 
 if [ "$USE_RANDOM" -eq 1 ]; then
     echo "=== Random Input Testing Mode ==="

@@ -90,3 +90,9 @@ Non-ZK variant of the same random benchmark:
 ./TruePix.sh --random --operation gray --constraint 1350 --no-zk
 ```
 
+Random mode on several cores. `--frames` is the total number of frames and `--threads` is the number of workers. Each worker is pinned to its own core and runs `n = frames / threads` times. The script then prints, for each thread, the sum of `TOTAL Signing Time`, `TOTAL Prove Time`, and `TOTAL Verify Time` over those `n` runs:
+
+```bash
+./TruePix.sh --random --operation gray --constraint 1350 --frames 8 --threads 4
+```
+
