@@ -262,8 +262,6 @@ run_random_multithread() {
     fi
 
     mkdir -p "$outdir"
-    export TRUEPIX_ROOT PWS_ABS="$pws_abs" CONSTRAINT_SIZE USE_ZK N_PER_THREAD="$n_per"
-    export -f run_random_once multithread_worker
 
     local -a pids=()
     local -a logs=()
@@ -275,9 +273,14 @@ run_random_multithread() {
         link_worker_bins "$outdir/thread_${t}"
         logs+=("$log")
         cpus+=("$cpu")
-        TRUEPIX_CPU="$cpu" taskset -c "$cpu" bash -c \
-            'cd "$1" || exit 1; export TRUEPIX_CPU="$2"; multithread_worker' \
-            _ "$outdir/thread_${t}" "$cpu" >"$log" 2>&1 &
+        # Stay in this bash so the worker function's heredoc is not rewritten
+        # by export -f. Pin the shell itself; children inherit that CPU.
+        (
+            cd "$outdir/thread_${t}" || exit 1
+            export TRUEPIX_CPU="$cpu" PWS_ABS="$pws_abs" N_PER_THREAD="$n_per"
+            taskset -cp "$cpu" "$BASHPID" >/dev/null
+            multithread_worker
+        ) >"$log" 2>&1 &
         pids+=("$!")
     done
 
@@ -308,6 +311,9 @@ run_random_multithread() {
             "${verify_sum}s (n=${verify_n})"
         if [ "$sign_n" -ne "$n_per" ] || [ "$prove_n" -ne "$n_per" ] || [ "$verify_n" -ne "$n_per" ]; then
             echo "Thread $t: expected ${n_per} samples of each metric, see ${logs[$t]}"
+            echo "----- ${logs[$t]} (tail) -----"
+            tail -n 40 "${logs[$t]}"
+            echo "----- end -----"
             fail=1
         fi
     done
