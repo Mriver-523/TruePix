@@ -1,52 +1,3 @@
-TruePix (Hyrax-derived) — Copyright and License
-===============================================
-
-This directory contains the TruePix protocol implementation (and related
-helpers under this tree, excluding separately licensed Orion vendored
-dependencies). It is a **derivative work** of the Hyrax interactive-proof
-codebase:
-
-  https://github.com/hyraxZK
-
-substantially modified and extended for verifiable video editing (TruePix).
-
-Copyright
----------
-
-  Copyright 2017 Riad S. Wahby and the Hyrax authors
-    (original Hyrax material retained in this tree)
-
-  Copyright 2025-2026 the TruePix authors
-    (TruePix-specific modifications and new code)
-
-Replace "the TruePix authors" with your legal name or organization if desired.
-Retain **both** copyright lines when redistributing.
-
-License
--------
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this software except in compliance with the License.
-You may obtain a copy of the License below, or at:
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-Additional notes
-----------------
-
-- Attribution for this component also appears in `NOTICE` (this directory)
-  and in the repository-root `NOTICE` / `LICENSE`.
-- Trees under `Orion/` include their own LICENSE files; third-party code
-  under `Orion/*/include/` retains upstream licenses.
-
-=======================================================================
-
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
@@ -235,8 +186,7 @@ Additional notes
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-   Copyright 2017 Riad S. Wahby and the Hyrax authors
-   Copyright 2025-2026 the TruePix authors
+   Copyright [yyyy] [name of copyright owner]
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -246,7 +196,6 @@ Additional notes
 
    Unless required by applicable law or agreed to in writing, software
    distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-   implied.
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
