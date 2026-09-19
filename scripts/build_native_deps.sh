@@ -76,5 +76,8 @@ build_autotools_pkg \
 echo "Native deps ready."
 (
     cd "$ROOT/TruePix-main"
-    python3 -c "import pypws; import pymiracl; print('pypws + pymiracl OK')"
+    # pypws / pymiracl are cffi packages under libpws/python and
+    # pymiracl/python; they are on no default sys.path.
+    PYTHONPATH="$ROOT/libpws/python:$ROOT/pymiracl/python${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -c "import pypws; import pymiracl; print('pypws + pymiracl OK')"
 )

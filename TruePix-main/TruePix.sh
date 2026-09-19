@@ -12,6 +12,9 @@ TRUEPIX_ROOT="$SCRIPT_DIR"
 VIDEO_EDITION_DIR="$(dirname "$SCRIPT_DIR")/VideoEdition"
 PWS_DIR="$TRUEPIX_ROOT/pws"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+# The pypws / pymiracl cffi packages live in sibling trees; without these
+# entries `import pypws` fails in every python3 invocation below.
+export PYTHONPATH="$REPO_ROOT/libpws/python:$REPO_ROOT/pymiracl/python${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "Starting TruePix processing..."
 echo "TruePix root: $TRUEPIX_ROOT"
@@ -126,7 +129,9 @@ run_truepix_proofs_optimized() {
 
     if [ "$use_random" = "1" ]; then
         echo "=== Preparing shared random input/output ==="
-        if ! PYTHONPATH=. python3 - <<PY
+        # Keep the caller's PYTHONPATH. PYTHONPATH=. would drop the
+        # libpws/python and pymiracl/python entries exported above.
+        if ! PYTHONPATH="$TRUEPIX_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<PY
 from libTruePix.defs import Defs
 from libTruePix.fp2_link import prepare_random_circuit_io
 Defs.configure()

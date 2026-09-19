@@ -63,7 +63,10 @@ echo
 echo "========== Smoke checks =========="
 (
     cd "$TRUEPIX"
-    python3 -c "import pypws; import pymiracl; print('pypws + pymiracl OK')"
+    # pypws / pymiracl are cffi packages under libpws/python and
+    # pymiracl/python; they are on no default sys.path.
+    PYTHONPATH="$ROOT/libpws/python:$ROOT/pymiracl/python${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -c "import pypws; import pymiracl; print('pypws + pymiracl OK')"
     test -x ./linearPC_multi_commit_zk
     test -x ./linearPC_multi_prove_zk
     test -x ./linearPC_multi_open_zk

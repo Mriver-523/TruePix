@@ -1,4 +1,4 @@
-AM_CPPFLAGS = -I$(srcdir)/../circuit $(OpenSSL_CFLAGS)
+AM_CPPFLAGS = -I$(srcdir)/../circuit -I$(srcdir)/../pws2svg $(OpenSSL_CFLAGS)
 AM_CXXFLAGS = $(GLOBAL_CXXFLAGS) $(OPT_CXXFLAGS)
 
 bin_PROGRAMS = pwsrepeat
