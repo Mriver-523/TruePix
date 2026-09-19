@@ -5,7 +5,7 @@
 TruePix is a protocol prototype for verifiable images and videos editing.
 This implementation combines:
 
-- a video processing pipeline in Python and C++ (via FFmpeg) ;
+- a video processing pipeline implemented in Python and C++ using FFmpeg;
 - a multi-linear polynomial commitment to the input layer;
 - the GKR protocol for circuits;
 - QuickSilver as the outer, VOLE-based zero-knowledge proof system;
@@ -32,8 +32,9 @@ pip install -r requirements.txt
 
 ## Build
 
-Install prerequisites above first, then from the **repository root** run one
-compile script (Hyrax native libs, Orion binaries, `native_fp2`, and `fft_gkr`):
+After installing the prerequisites, run the following setup script from the
+**repository root**. It builds the Hyrax native libraries, Orion binaries,
+`native_fp2`, and `fft_gkr`.
 
 ```bash
 ./setup.sh
