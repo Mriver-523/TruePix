@@ -378,6 +378,7 @@ def run_truepix(verifier_info):
         infer_gkr_input_layout,
         orion_binary,
         orion_env,
+        parse_orion_commit_time,
         parse_orion_prove_time,
         write_point_file,
     )
@@ -416,6 +417,8 @@ def run_truepix(verifier_info):
 
     orion_proof_size = None
     orion_prove_time = parse_orion_prove_time(result.stdout)
+    orion_commit_time = parse_orion_commit_time(result.stdout)
+    input_prove_time = (orion_prove_time or 0.0) + (orion_commit_time or 0.0)
     orion_ec_wall = None
     orion_ec_prover = None
     orion_ec_verifier = None
@@ -427,7 +430,7 @@ def run_truepix(verifier_info):
     orion_ec_wall, orion_ec_prover, orion_ec_verifier = parse_ec_y1_metrics(result.stdout)
 
     print_metric("Input Proof Size", f"{orion_proof_size if orion_proof_size is not None else 0:,}", "bytes")
-    print_metric("Input Prove Time", f"{(orion_prove_time or 0.0):.6f}", "seconds")
+    print_metric("Input Prove Time", f"{input_prove_time:.6f}", "seconds")
     print_metric("EC(y1) Code-Switch Time", f"{(orion_ec_wall or 0.0):.6f}", "seconds")
     print_metric("EC(y1) Prover Time", f"{(orion_ec_prover or 0.0):.6f}", "seconds")
     print_metric("EC(y1) Verifier Time", f"{(orion_ec_verifier or 0.0):.6f}", "seconds")
@@ -435,7 +438,7 @@ def run_truepix(verifier_info):
     
     # Overall statistics
     print_section_header("Editing and Prove Performance")
-    total_Prove_time = hyrax_prove_time+(orion_prove_time or 0.0)
+    total_Prove_time = hyrax_prove_time + input_prove_time
     
     print_metric("TOTAL Prove Time", f"{total_Prove_time:.6f}", "seconds")
     print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")

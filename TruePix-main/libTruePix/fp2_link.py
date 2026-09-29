@@ -113,7 +113,7 @@ def parse_orion_verification_time(stdout: str) -> Optional[float]:
 
 def parse_orion_prove_time(stdout: str) -> Optional[float]:
     """
-    Sum all 'Open time' lines from Orion prove/open (Input Prove Time).
+    Sum all 'Open time' lines from Orion prove/open.
 
     Non-ZK prints one line; ZK masked+mask openings print two, and Input Prove
     Time should count both. Streaming re-encode is reported separately as
@@ -123,6 +123,26 @@ def parse_orion_prove_time(stdout: str) -> Optional[float]:
     found = False
     for line in stdout.splitlines():
         if "Open time" not in line:
+            continue
+        try:
+            total += float(line.split()[-1])
+            found = True
+        except ValueError:
+            pass
+    return total if found else None
+
+
+def parse_orion_commit_time(stdout: str) -> Optional[float]:
+    """
+    Sum all 'Commit time' lines from Orion prove (re-commit before opening).
+
+    Non-ZK prints one line; ZK prints one line per polynomial
+    (masked and mask). Input Prove Time includes these together with Open time.
+    """
+    total = 0.0
+    found = False
+    for line in stdout.splitlines():
+        if "Commit time" not in line:
             continue
         try:
             total += float(line.split()[-1])
