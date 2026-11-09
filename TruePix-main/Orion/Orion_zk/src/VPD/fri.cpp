@@ -127,7 +127,50 @@ void fri::delete_self()
 {
 	if(L_group != NULL)
 		delete[] L_group;
+	L_group = NULL;
 	cpd.delete_self();
+	for(int o = 0; o < 2; ++o)
+	{
+		// create_tree() allocates the Merkle array with malloc.
+		if(witness_merkle[o] != NULL)
+			free(witness_merkle[o]);
+		witness_merkle[o] = NULL;
+		if(witness_rs_codeword_interleaved[o] != NULL)
+			delete[] witness_rs_codeword_interleaved[o];
+		witness_rs_codeword_interleaved[o] = NULL;
+		if(leaf_hash[o] != NULL)
+			delete[] leaf_hash[o];
+		leaf_hash[o] = NULL;
+		if(visited_init[o] != NULL)
+			delete[] visited_init[o];
+		visited_init[o] = NULL;
+		if(visited_witness[o] != NULL)
+			delete[] visited_witness[o];
+		visited_witness[o] = NULL;
+		for(int s = 0; s < slice_number; ++s)
+		{
+			// before_arrange aliases l_eval / h_eval_arr; those owners free them.
+			witness_rs_codeword_before_arrange[o][s] = NULL;
+			if(witness_rs_mapping[o][s] != NULL)
+				delete[] witness_rs_mapping[o][s];
+			witness_rs_mapping[o][s] = NULL;
+		}
+	}
+	for(int i = 0; i < max_bit_length; ++i)
+	{
+		if(visited[i] != NULL)
+			delete[] visited[i];
+		visited[i] = NULL;
+	}
+	if(virtual_oracle_witness != NULL)
+		delete[] virtual_oracle_witness;
+	virtual_oracle_witness = NULL;
+	if(virtual_oracle_witness_mapping != NULL)
+		delete[] virtual_oracle_witness_mapping;
+	virtual_oracle_witness_mapping = NULL;
+	if(r_extended != NULL)
+		delete[] r_extended;
+	r_extended = NULL;
 }
 std::pair<std::vector<std::pair<prime_field::field_element, prime_field::field_element> >, std::vector<__hhash_digest> > fri::request_init_value_with_merkle(long long pow_0, long long pow_1, int &new_size, const int oracle_indicator)
 {

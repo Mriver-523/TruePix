@@ -1,4 +1,6 @@
 #include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -125,7 +127,7 @@ int main(int argc, char* argv[]) {
 
     if (truepix::enabled()) {
         if (userandom) {
-            fprintf(stderr, "truepix requires shared input.txt (userandom=0)\n");
+            fprintf(stderr, "fp2-linked-v1 requires shared input.txt (userandom=0)\n");
             return 1;
         }
         truepix::Layout lay;
@@ -156,31 +158,54 @@ int main(int argc, char* argv[]) {
         }
         truepix::reverse_point(r, r_orion, lay.lg_n);
 
+        const char *mode = getenv("TRUEPIX_ORION_MODE");
+        // Default NIZK; only explicit interactive opts out.
+        const bool nizk = !(mode && (strcmp(mode, "interactive") == 0 ||
+                                     strcmp(mode, "INTERACTIVE") == 0 ||
+                                     strcmp(mode, "interact") == 0));
+
+        bool root_ok = true;
+        std::pair<prime_field::field_element, bool> result;
+        prime_field::field_element a_clear =
+            truepix::mle_gkr(coefs, r, lay.lg_n, lay.n);
+        if (nizk) {
+            delete[] coefs;
+            coefs = nullptr;
+            __hhash_digest expected_root;
+            memset(&expected_root, 0, sizeof(expected_root));
+            if (!truepix::root_from_hex(manifest.masked_root, expected_root)) {
+                fprintf(stderr, "TruePix: invalid root hex in manifest\n");
+                return 1;
+            }
+            timer_mark(open_t0);
+            result = verify_opening_proof(
+                r_orion, lay.lg_n, (int)lay.n, expected_root, "orion_proof.bin");
+            timer_mark(open_t1);
+            printf("Open time %lf\n", time_diff(open_t0, open_t1));
+            printf("%s\n", result.second ? "succ" : "fail");
+        } else {
         timer_mark(commit_t0);
         auto h = commit(coefs, lay.n);
         timer_mark(commit_t1);
         printf("Commit time %lf\n", time_diff(commit_t0, commit_t1));
+        delete[] coefs;
+        coefs = nullptr;
 
         const std::string root = truepix::root_hex(h[1]);
-        bool root_ok = (root == manifest.masked_root);
+        root_ok = (root == manifest.masked_root);
         if (!root_ok) {
             fprintf(stderr,
                     "TruePix: Merkle root mismatch\n  committed: %s\n  manifest:  %s\n",
                     root.c_str(), manifest.masked_root.c_str());
         }
 
-        long long size_after_padding = 1;
-        while (size_after_padding < lay.n / column_size * 2)
-            size_after_padding *= 2;
-        write_transmitted_data_commit(h, size_after_padding * 2, "transmitted_data.txt");
-
         timer_mark(open_t0);
-        auto result = open_and_verify(r_orion, lay.lg_n, (int)lay.n, h);
+        result = open_and_verify(r_orion, lay.lg_n, (int)lay.n, h);
         timer_mark(open_t1);
         printf("Open time %lf\n", time_diff(open_t0, open_t1) - last_encode_preprocess_time);
         printf("%s\n", result.second ? "succ" : "fail");
+        }
 
-        prime_field::field_element a_clear = truepix::mle_gkr(coefs, r, lay.lg_n, lay.n);
         bool consistent = (result.first == a_clear);
         if (!consistent) {
             fprintf(stderr, "TruePix: verified opening %llu+%llui disagrees with the "

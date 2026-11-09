@@ -29,6 +29,7 @@ import libTruePix.circuitnizkvec_vole_ZK
 import libTruePix.VOLECommit
 import libTruePix.VOLECommit_zk
 from libTruePix.defs import Defs
+from libTruePix import util
 from libTruePix.fiatshamir import FiatShamir
 import libTruePix.parse_pws
 import libTruePix.randutil as randutil
@@ -171,7 +172,7 @@ def print_metric(name, value, unit=""):
     print(f"{name:<30}: {value:>15} {unit}")
 
 def run_truepix(verifier_info):
-    print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")
+    print_metric("Max Memory Usage", f"{util.peak_rss_mb():.2f}", "MB")
 
     # Every failure below is recorded here and turned into a non-zero exit
     # status at the end. Previously a rejected proof was only logged, so the
@@ -363,7 +364,7 @@ def run_truepix(verifier_info):
                  ecdsa_verify_time)
     
     print_metric("TOTAL Verify Time", f"{total_Verify_time:.6f}", "seconds")
-    print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")
+    print_metric("Max Memory Usage", f"{util.peak_rss_mb():.2f}", "MB")
 
     return not verification_failed
 

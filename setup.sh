@@ -25,8 +25,13 @@ echo
 need_cmd make
 need_cmd g++
 need_cmd cmake
-need_cmd xsltproc
 need_cmd python3
+# xsltproc is only used to regenerate XKCP Makefiles. Prebuilt
+# libXKCP.a in Orion_*/lib skips that step.
+if [ ! -f "$TRUEPIX/Orion/Orion_zk/lib/libXKCP.a" ] || \
+   [ ! -f "$TRUEPIX/Orion/Orion_nonzk/lib/libXKCP.a" ]; then
+    need_cmd xsltproc
+fi
 
 echo "========== 1/3 Hyrax native libs (libpws, pymiracl) =========="
 "$ROOT/scripts/build_native_deps.sh"

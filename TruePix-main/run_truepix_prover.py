@@ -170,24 +170,6 @@ def print_subsection_header(title):
 def print_metric(name, value, unit=""):
     print(f"{name:<30}: {value:>15} {unit}")
 
-def parse_ec_y1_metrics(stdout):
-    """Sum Protocol-3 EC(y1) inner-proof timings from Orion stdout.
-
-    ZK opens two polynomials (masked + mask), so each line may appear twice.
-    """
-    wall, prover, verifier = [], [], []
-    for line in stdout.splitlines():
-        if "EC(y1) code-switching time" in line:
-            wall.append(float(line.split()[-1]))
-        elif "EC(y1) prover time" in line:
-            prover.append(float(line.split()[-1]))
-        elif "EC(y1) verifier time" in line:
-            verifier.append(float(line.split()[-1]))
-    return (
-        sum(wall) if wall else None,
-        sum(prover) if prover else None,
-        sum(verifier) if verifier else None,
-    )
 
 def sweep_stale_vole_files():
     """
@@ -234,7 +216,7 @@ def get_vole_filenames(input_filename):
     return prover_file, verifier_file
 
 def run_truepix(verifier_info):
-    print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")
+    print_metric("Max Memory Usage", f"{util.peak_rss_mb():.2f}", "MB")
     # set curve and prime
     #Defs.curve = verifier_info.curve
     #util.set_prime(libTruePix.commit.MiraclEC.get_order(Defs.curve))
@@ -255,7 +237,8 @@ def run_truepix(verifier_info):
         security_repetitions=Defs.vole_security_repetitions,
     )
     vole_gen.generate_deltas()
-    num_instances = 100000
+    from libTruePix.ExtVOLEGen import DEFAULT_VOLE_INSTANCES
+    num_instances = DEFAULT_VOLE_INSTANCES
     vole_gen.generate_vole_instances(num_instances)
     verifier_info.VOLEPName, verifier_info.VOLEVName = get_vole_filenames(
         verifier_info.inputFile
@@ -354,21 +337,20 @@ def run_truepix(verifier_info):
     # Calculate and print Hyrax time
     hyrax_prove_time = verifier_info.pEndTime - verifier_info.pStartTime
     proof_size = FiatShamir.proof_size(proof)
-    print_metric("Circuit Proof Size", f"{int(proof_size[1]):,}", "bytes")  # Adjust index based on actual situation
+    circuit_proof_bytes = int(proof_size[1])
+    print_metric("Circuit Proof Size", f"{circuit_proof_bytes:,}", "bytes")  # Adjust index based on actual situation
     print_metric("Circuit Prove Time", f"{verifier_info.timing_data['total_prove']:.6f}", "seconds")
-    print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")
+    print_metric("Max Memory Usage", f"{util.peak_rss_mb():.2f}", "MB")
     # VOLE correlations consumed during circuit prove (prover's (u,v) view).
+    vole_bytes = 0
     try:
-        from libTruePix.fp2_link import format_vole_usage_metrics
+        from libTruePix.fp2_link import format_vole_usage_metrics, vole_usage_from_commit
+        _, vole_bytes = vole_usage_from_commit(getattr(prv, "com", None))
         for name, value, unit in format_vole_usage_metrics(getattr(prv, "com", None), "Prover"):
             print_metric(name, value, unit)
     except Exception:
         pass
      # 2. Input equivalence proof (this part is replaced by orion)
-
-    orion_ec_wall = None
-    orion_ec_prover = None
-    orion_ec_verifier = None
 
     # The prove phase used to run with the legacy Y/Cb/Cr packing, a fresh
     # random mask and a random opening point, so it neither committed to
@@ -378,8 +360,8 @@ def run_truepix(verifier_info):
         infer_gkr_input_layout,
         orion_binary,
         orion_env,
-        parse_orion_commit_time,
         parse_orion_prove_time,
+        parse_orion_proof_size,
         write_point_file,
     )
 
@@ -415,33 +397,29 @@ def run_truepix(verifier_info):
             "tensor-IOP check)"
         )
 
-    orion_proof_size = None
+    orion_proof_size = parse_orion_proof_size(result.stdout)
     orion_prove_time = parse_orion_prove_time(result.stdout)
-    orion_commit_time = parse_orion_commit_time(result.stdout)
-    input_prove_time = (orion_prove_time or 0.0) + (orion_commit_time or 0.0)
-    orion_ec_wall = None
-    orion_ec_prover = None
-    orion_ec_verifier = None
-    for line in result.stdout.split('\n'):
-        if "Proof size for tensor IOP" in line:
-            # ZK opens two polynomials; non-ZK opens one.
-            factor = 2 if VerifierInfo.usezk == 1 else 1
-            orion_proof_size = int(line.split()[-2]) * factor
-    orion_ec_wall, orion_ec_prover, orion_ec_verifier = parse_ec_y1_metrics(result.stdout)
-
-    print_metric("Input Proof Size", f"{orion_proof_size if orion_proof_size is not None else 0:,}", "bytes")
-    print_metric("Input Prove Time", f"{input_prove_time:.6f}", "seconds")
-    print_metric("EC(y1) Code-Switch Time", f"{(orion_ec_wall or 0.0):.6f}", "seconds")
-    print_metric("EC(y1) Prover Time", f"{(orion_ec_prover or 0.0):.6f}", "seconds")
-    print_metric("EC(y1) Verifier Time", f"{(orion_ec_verifier or 0.0):.6f}", "seconds")
+    input_proof_bytes = int(orion_proof_size if orion_proof_size is not None else 0)
+    print_metric("Input Proof Size", f"{input_proof_bytes:,}", "bytes")
+    print_metric("Input Prove Time", f"{(orion_prove_time or 0.0):.6f}", "seconds")
     
     
     # Overall statistics
     print_section_header("Editing and Prove Performance")
-    total_Prove_time = hyrax_prove_time + input_prove_time
+    total_Prove_time = hyrax_prove_time + (orion_prove_time or 0.0)
+    # Same as signer Input Commit Size: one Merkle root (32B), or masked+mask (64B) under ZK.
+    # Prove recommits the same public commitment(s); count them in the total proof.
+    commit_recommit_bytes = 32 * (1 + (1 if VerifierInfo.usezk == 1 else 0))
+    total_proof_bytes = (
+        int(commit_recommit_bytes)
+        + int(vole_bytes)
+        + int(circuit_proof_bytes)
+        + int(input_proof_bytes)
+    )
     
     print_metric("TOTAL Prove Time", f"{total_Prove_time:.6f}", "seconds")
-    print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")
+    print_metric("Total Proof Size", f"{total_proof_bytes:,}", "bytes")
+    print_metric("Max Memory Usage", f"{util.peak_rss_mb():.2f}", "MB")
 
 
 def print_timing_info(verifier_info):

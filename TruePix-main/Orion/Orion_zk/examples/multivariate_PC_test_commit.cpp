@@ -43,7 +43,7 @@ void write_transmitted_data_commit(
 }
 
 
-// truepix: commit to one polynomial and report its Merkle root, which the
+// fp2-linked-v1: commit to one polynomial and report its Merkle root, which the
 // prove and open phases are later required to reproduce.
 static truepix::CommitReport truepix_commit_only(
     prime_field::field_element *poly,
@@ -55,6 +55,7 @@ static truepix::CommitReport truepix_commit_only(
     rep.ok = 0;
     memset(rep.root, 0, sizeof(rep.root));
 
+    set_retain_encoded_codeword(true);
     timer_mark(commit_t0);
     auto h = commit(poly, N);
     timer_mark(commit_t1);
@@ -270,10 +271,10 @@ int main(int argc, char* argv[]) {
     }
 
     if (truepix::enabled()) {
-        // truepix: commit with the same packing the GKR circuit uses and
+        // fp2-linked-v1: commit with the same packing the GKR circuit uses and
         // publish the resulting roots so prove/open can be pinned to them.
         if (userandom) {
-            fprintf(stderr, "truepix requires shared input.txt (userandom=0)\n");
+            fprintf(stderr, "fp2-linked-v1 requires shared input.txt (userandom=0)\n");
             return 1;
         }
         truepix::Layout lay;
@@ -291,25 +292,38 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Build one polynomial at a time from the seed so masked and mask are
-        // never both resident (~32MiB peak saving on large N).
+        // Both polynomials are resident so the first expander layer can scan
+        // them together. Deeper layers and the two Merkle trees stay separate.
         truepix::CommitReport rep_masked, rep_mask;
-        {
-            printf("Running with mask...\n");
-            prime_field::field_element *poly =
-                truepix::alloc_masked_from_seed(coefs, lay.n, seed);
-            rep_masked = truepix_commit_only(
-                poly, lay.n, "transmitted_data_mask.txt", "masked");
-            delete[] poly;
-        }
-        {
-            printf("Running without mask...\n");
-            prime_field::field_element *poly =
-                truepix::alloc_mask_from_seed(lay.n, seed);
-            rep_mask = truepix_commit_only(
-                poly, lay.n, "transmitted_data_masked.txt", "mask");
-            delete[] poly;
-        }
+        printf("Running fused mask commit...\n");
+        prime_field::field_element *masked_poly =
+            truepix::alloc_masked_from_seed(coefs, lay, seed);
+        prime_field::field_element *mask_poly =
+            truepix::alloc_mask_from_seed(lay, seed);
+        // coefs not needed after masked/mask are built (fp2 signs the manifest).
+        delete[] coefs;
+        coefs = nullptr;
+        // Same retain path as prove recommit: keep compact encoded matrices
+        // for the commit phase (process-local; not reused by prove).
+        set_retain_encoded_codeword(true);
+        zk_pair_commit pc = commit_pair(masked_poly, mask_poly, lay.n);
+        delete[] masked_poly;
+        delete[] mask_poly;
+
+        // fp2-linked-v1 attests orion_commit.json roots; skip the hex dump of
+        // full Merkle trees (transmitted_data_*.txt) to cut I/O and peak RSS.
+        const std::string root_masked = truepix::root_hex(pc.mt_masked[1]);
+        const std::string root_mask = truepix::root_hex(pc.mt_mask[1]);
+        free(pc.mt_masked);
+        free(pc.mt_mask);
+        pc.mt_masked = nullptr;
+        pc.mt_mask = nullptr;
+        memset(rep_masked.root, 0, sizeof(rep_masked.root));
+        memset(rep_mask.root, 0, sizeof(rep_mask.root));
+        memcpy(rep_masked.root, root_masked.c_str(), root_masked.size());
+        memcpy(rep_mask.root, root_mask.c_str(), root_mask.size());
+        rep_masked.ok = 1;
+        rep_mask.ok = 1;
 
         bool ok = rep_masked.ok && rep_mask.ok;
         if (ok) {
@@ -320,7 +334,6 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "TruePix: commit phase failed; no manifest written\n");
         }
 
-        delete[] coefs;
         fflush(stdout);
         return ok ? 0 : 1;
     }

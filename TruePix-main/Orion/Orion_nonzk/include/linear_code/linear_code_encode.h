@@ -5,6 +5,15 @@ extern prime_field::field_element *scratch[2][100];
 
 extern bool __encode_initialized;
 
+inline long long encode_output_len(long long n, int dep = 0)
+{
+    if(n <= distance_threshold)
+        return n;
+    long long R = (long long)(alpha * n);
+    long long L = encode_output_len(R, dep + 1);
+    return n + L + D[dep].R;
+}
+
 inline int encode(const prime_field::field_element *src, prime_field::field_element *dst, long long n, int dep = 0)
 {
     if(!__encode_initialized)

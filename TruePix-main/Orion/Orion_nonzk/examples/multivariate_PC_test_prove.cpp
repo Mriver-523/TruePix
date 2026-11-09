@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -125,7 +126,7 @@ int main(int argc, char* argv[]) {
 
     if (truepix::enabled()) {
         if (userandom) {
-            fprintf(stderr, "truepix requires shared input.txt (userandom=0)\n");
+            fprintf(stderr, "fp2-linked-v1 requires shared input.txt (userandom=0)\n");
             return 1;
         }
         truepix::Layout lay;
@@ -154,10 +155,16 @@ int main(int argc, char* argv[]) {
         }
         truepix::reverse_point(r, r_orion, lay.lg_n);
 
+        // Keep only the scalar so the plaintext polynomial is gone before EC.
+        prime_field::field_element mle_clear =
+            truepix::mle_gkr(coefs, r, lay.lg_n, lay.n);
         timer_mark(commit_t0);
+        set_retain_encoded_codeword(true);
         auto h = commit(coefs, lay.n);
         timer_mark(commit_t1);
         printf("Commit time %lf\n", time_diff(commit_t0, commit_t1));
+        delete[] coefs;
+        coefs = nullptr;
 
         const std::string root = truepix::root_hex(h[1]);
         bool root_ok = (root == manifest.masked_root);
@@ -167,18 +174,14 @@ int main(int argc, char* argv[]) {
                     root.c_str(), manifest.masked_root.c_str());
         }
 
-        long long size_after_padding = 1;
-        while (size_after_padding < lay.n / column_size * 2)
-            size_after_padding *= 2;
-        write_transmitted_data_commit(h, size_after_padding * 2, "transmitted_data.txt");
-
+        setenv("TRUEPIX_ORION_PROOF_FILE", "orion_proof.bin", 1);
         timer_mark(open_t0);
         auto result = open_and_verify(r_orion, lay.lg_n, (int)lay.n, h);
         timer_mark(open_t1);
         printf("Open time %lf\n", time_diff(open_t0, open_t1) - last_encode_preprocess_time);
         printf("%s\n", result.second ? "succ" : "fail");
 
-        bool consistent = (result.first == truepix::mle_gkr(coefs, r, lay.lg_n, lay.n));
+        bool consistent = (result.first == mle_clear);
         bool ok = result.second && root_ok && consistent;
         printf("TruePix prove: open=%d root=%d mle_consistent=%d -> ok=%d\n",
                (int)result.second, (int)root_ok, (int)consistent, (int)ok);
@@ -247,6 +250,7 @@ int main(int argc, char* argv[]) {
     }
 
     timer_mark(commit_t0);
+    set_retain_encoded_codeword(true);
     auto h = commit(coefs, N);
     timer_mark(commit_t1);
     printf("Commit time %lf\n", time_diff(commit_t0, commit_t1));

@@ -35,6 +35,10 @@ def _read(path: str) -> bytes:
 
 def build_message(usezk: int = 1) -> bytes:
     del usezk  # message is independent of ZK vs non-ZK once the manifest exists
+    # Currently signs the Orion commitment manifest only.
+    # If raw input/data also needs to be covered by the ECDSA signature,
+    # append or hash that raw payload into the message here (and mirror the
+    # same construction in verify()).
     return _DOMAIN + _read(ORION_COMMIT_FILE)
 
 
@@ -47,6 +51,8 @@ def sign(usezk: int = 1) -> dict:
     vk = sk.verifying_key
     keygen_time = time.time() - keygen_start
 
+    # ECDSA sign over `message` from build_message(). Extend build_message()
+    # above if raw data must be included in what is signed.
     sign_start = time.time()
     signature = sk.sign(message, hashfunc=HASHFUNC)
     sign_time = time.time() - sign_start

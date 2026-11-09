@@ -61,38 +61,62 @@ class ExtVOLECommit(object):
             return [_as_fp2(v, self.p) for v in value]
         return [_as_fp2(value, self.p)] * self.security_repetitions
 
-    def load_from_file_prover(self, filename: str):
-        with open(filename, "r") as fh:
-            data = json.load(fh)
-        if data.get("protocol") != self.PROTOCOL or data.get("field") != self.FIELD_ID:
-            raise ValueError("Not an ExtVOLE prover file for truepix")
-        self.security_repetitions = int(data["security_repetitions"])
+    def _pack_coord_streams(self, streams):
+        """streams is a list of (real array, imag array) or JSON pair-lists."""
         try:
             from libTruePix.native_fp2_bridge import Fp2Buf, AVAILABLE as _nat
             import ctypes
             _U64 = ctypes.c_uint64
         except ImportError:
             _nat = False
-
-        def _pack_streams(key):
-            if not _nat:
-                return [[Fp2.deserialize(pair, self.p) for pair in stream] for stream in data[key]]
-            packed = []
-            for stream in data[key]:
-                n = len(stream)
-                rr = (_U64 * n)()
-                ii = (_U64 * n)()
-                for j, pair in enumerate(stream):
-                    rr[j] = int(pair[0])
-                    ii[j] = int(pair[1])
+        packed = []
+        for stream in streams:
+            if isinstance(stream, tuple):
+                re, im = stream
+                n = len(re)
+                if not _nat:
+                    packed.append([Fp2(int(re[j]), int(im[j]), self.p) for j in range(n)])
+                    continue
+                rr = (_U64 * n).from_buffer_copy(re.tobytes())
+                ii = (_U64 * n).from_buffer_copy(im.tobytes())
                 packed.append(Fp2Buf(rr, ii, n))
-            return packed
+                continue
+            n = len(stream)
+            if not _nat:
+                packed.append([Fp2.deserialize(pair, self.p) for pair in stream])
+                continue
+            rr = (_U64 * n)()
+            ii = (_U64 * n)()
+            for j, pair in enumerate(stream):
+                rr[j] = int(pair[0])
+                ii[j] = int(pair[1])
+            packed.append(Fp2Buf(rr, ii, n))
+        return packed
 
-        self.u_lists = _pack_streams("u")
+    def load_from_file_prover(self, filename: str):
+        from libTruePix.ExtVOLEGen import read_vole_file
+        blob = read_vole_file(filename)
+        if blob is not None:
+            if blob["role"] != 1:
+                raise ValueError("Not an ExtVOLE prover file for truepix")
+            self.security_repetitions = int(blob["security_repetitions"])
+            reps = self.security_repetitions
+            self.u_lists = self._pack_coord_streams(blob["streams"][:reps])
+            self.v_lists = self._pack_coord_streams(blob["streams"][reps:])
+            self.VOLEindex = blob["n"] if self.u_lists else 0
+            self.numVOLE = 0
+            self.messages = []
+            return self.VOLEindex
+        with open(filename, "r") as fh:
+            data = json.load(fh)
+        if data.get("protocol") != self.PROTOCOL or data.get("field") != self.FIELD_ID:
+            raise ValueError("Not an ExtVOLE prover file for truepix")
+        self.security_repetitions = int(data["security_repetitions"])
+        self.u_lists = self._pack_coord_streams(data["u"])
         # Drop JSON stream ASAP to cut peak RSS before packing v.
         if isinstance(data, dict):
             data.pop("u", None)
-        self.v_lists = _pack_streams("v")
+        self.v_lists = self._pack_coord_streams(data["v"])
         if isinstance(data, dict):
             data.pop("v", None)
         self.VOLEindex = len(self.u_lists[0]) if self.u_lists else 0
@@ -102,35 +126,25 @@ class ExtVOLECommit(object):
         return self.VOLEindex
 
     def load_from_file_verifier(self, filename: str):
+        from libTruePix.ExtVOLEGen import read_vole_file
+        blob = read_vole_file(filename)
+        if blob is not None:
+            if blob["role"] != 2:
+                raise ValueError("Not an ExtVOLE verifier file for truepix")
+            self.security_repetitions = int(blob["security_repetitions"])
+            self.deltas = [Fp2(int(r), int(i), self.p) for r, i in blob["deltas"]]
+            self.p_lists = self._pack_coord_streams(blob["streams"])
+            self.VOLEindex = blob["n"] if self.p_lists else 0
+            self.numVOLE = 0
+            self.messages = []
+            return self.VOLEindex
         with open(filename, "r") as fh:
             data = json.load(fh)
         if data.get("protocol") != self.PROTOCOL or data.get("field") != self.FIELD_ID:
             raise ValueError("Not an ExtVOLE verifier file for truepix")
         self.security_repetitions = int(data["security_repetitions"])
         self.deltas = [Fp2.deserialize(pair, self.p) for pair in data["delta"]]
-        # Pack VOLE MAC stream into contiguous buffers to cut peak object memory.
-        try:
-            from libTruePix.native_fp2_bridge import Fp2Buf, AVAILABLE as _nat
-            import ctypes
-            _U64 = ctypes.c_uint64
-        except ImportError:
-            _nat = False
-        if _nat:
-            packed = []
-            for stream in data["p"]:
-                n = len(stream)
-                rr = (_U64 * n)()
-                ii = (_U64 * n)()
-                for j, pair in enumerate(stream):
-                    rr[j] = int(pair[0])
-                    ii[j] = int(pair[1])
-                packed.append(Fp2Buf(rr, ii, n))
-            self.p_lists = packed
-        else:
-            self.p_lists = [
-                [Fp2.deserialize(pair, self.p) for pair in stream]
-                for stream in data["p"]
-            ]
+        self.p_lists = self._pack_coord_streams(data["p"])
         self.VOLEindex = len(self.p_lists[0]) if self.p_lists else 0
         self.numVOLE = 0
         self.messages = []

@@ -5,6 +5,7 @@
 
 import math
 import os
+import resource
 import sys
 import random
 
@@ -16,6 +17,19 @@ try:
     from libTruePix.native_fp2_bridge import Fp2Buf as _Fp2Buf
 except ImportError:  # pragma: no cover
     _Fp2Buf = None
+
+
+def peak_rss_mb():
+    """
+    Peak RSS in MiB: max of this process and waited children.
+
+    Linux ru_maxrss is kilobytes. Subprocess PCS tools (Orion) are not
+    included in RUSAGE_SELF; use RUSAGE_CHILDREN so callers can report
+    max(GKR/Python, PCS child) when the two run sequentially.
+    """
+    self_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    child_kb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return max(self_kb, child_kb) / 1024.0
 
 
 def set_prime(p):

@@ -12,6 +12,7 @@ import sys
 import subprocess
 
 from libTruePix import attest
+from libTruePix import util
 from libTruePix.fp2_link import cpu_pin, infer_gkr_input_layout, orion_binary, orion_env
 
 
@@ -59,6 +60,8 @@ def run_truepix(constraint_size, usezk, pws_file=None):
         print("Error: Orion commit phase did not report a commit time")
         sys.exit(1)
 
+    # ECDSA attestation over the Orion commitment (see libTruePix.attest).
+    # If raw data must also be signed, add it in attest.build_message().
     sig_info = attest.sign(usezk)
     ecdsa_sign_time = sig_info["sign_time"]
 
@@ -71,7 +74,7 @@ def run_truepix(constraint_size, usezk, pws_file=None):
     total_Signing_time = orion_commit_time + ecdsa_sign_time
 
     print_metric("TOTAL Signing Time", f"{total_Signing_time:.6f}", "seconds")
-    print_metric("Max Memory Usage", f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.2f}", "MB")
+    print_metric("Max Memory Usage", f"{util.peak_rss_mb():.2f}", "MB")
 
 
 def print_usage():

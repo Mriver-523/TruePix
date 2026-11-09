@@ -34,7 +34,13 @@ void delete_scratch_pad()
 {
     delete[] __dst[0];
     delete[] __dst[1];
+    delete[] __dst[2];
     delete[] twiddle_factor;
+    delete[] inv_twiddle_factor;
+    __dst[0] = __dst[1] = __dst[2] = nullptr;
+    twiddle_factor = nullptr;
+    inv_twiddle_factor = nullptr;
+    twiddle_factor_size = 0;
 }
 
 void fast_fourier_transform(const prime_field::field_element *coefficients, int coef_len, int order, prime_field::field_element root_of_unity, prime_field::field_element *result, prime_field::field_element *twiddle_fac)

@@ -249,15 +249,15 @@ void read_random_values(std::vector<int>& y_values, std::vector<int>& cb_values,
     }
 }
 
-//Main function
-// truepix: commit to one polynomial, require its Merkle root to match the
-// root published by the commit phase, then open at the GKR point.
-static truepix::OpenReport truepix_commit_and_open(
-    prime_field::field_element *poly,
+// Open one polynomial after commit_pair. The fused commit already built the
+// Merkle tree; this only checks the root and runs the opening.
+static truepix::OpenReport truepix_open_after_pair(
+    const prime_field::field_element *poly,
     long long N,
     int lg_N,
     prime_field::field_element *r_orion,
     bool use_group1,
+    __hhash_digest *mt,
     const std::string& expected_root,
     const std::string& transmitted_file,
     const char* label)
@@ -268,12 +268,7 @@ static truepix::OpenReport truepix_commit_and_open(
     rep.real = 0;
     rep.img = 0;
 
-    timer_mark(commit_t0);
-    auto h = commit(poly, N);
-    timer_mark(commit_t1);
-    printf("Commit time(%s) %lf\n", label, time_diff(commit_t0, commit_t1));
-
-    const std::string root = truepix::root_hex(h[1]);
+    const std::string root = truepix::root_hex(mt[1]);
     rep.root_ok = (root == expected_root) ? 1 : 0;
     if (!rep.root_ok) {
         fprintf(stderr,
@@ -281,14 +276,15 @@ static truepix::OpenReport truepix_commit_and_open(
                 label, root.c_str(), expected_root.c_str());
     }
 
-    long long size_after_padding = 1;
-    while (size_after_padding < N / column_size * 2)
-        size_after_padding *= 2;
-    int h_length = size_after_padding * 2;
-    write_transmitted_data_commit(h, h_length, transmitted_file);
-
+    (void)transmitted_file; // fp2 uses manifest roots + NIZK blobs, not hex dumps.
+    (void)poly;
+    // Per-polynomial proof path so ZK masked/mask openings do not overwrite.
+    {
+        const char *pf = use_group1 ? "orion_proof_masked.bin" : "orion_proof_mask.bin";
+        setenv("TRUEPIX_ORION_PROOF_FILE", pf, 1);
+    }
     timer_mark(open_t0);
-    auto result = open_and_verify(r_orion, lg_N, N, h, use_group1);
+    auto result = open_and_verify(r_orion, lg_N, N, mt, use_group1);
     timer_mark(open_t1);
     printf("Open time(%s): %lf\n", label, time_diff(open_t0, open_t1) - last_encode_preprocess_time);
     printf("Result: %s\n", result.second ? "succ" : "fail");
@@ -311,7 +307,7 @@ int main(int argc, char* argv[]) {
         // before this the prove binary used the legacy Y/Cb/Cr packing and so
         // committed to a completely different polynomial.
         if (userandom) {
-            fprintf(stderr, "truepix requires shared input.txt (userandom=0)\n");
+            fprintf(stderr, "fp2-linked-v1 requires shared input.txt (userandom=0)\n");
             return 1;
         }
         truepix::Layout lay;
@@ -345,71 +341,42 @@ int main(int argc, char* argv[]) {
         }
         truepix::reverse_point(r, r_orion, lay.lg_n);
 
-        // Serial openings in isolated children. Parent keeps only coefs (+point);
-        // each child regenerates mask/masked from the commit seed so the parent
-        // never holds all three N-element polynomials at once (~32MiB saved).
-        fflush(stdout);
-        truepix::OpenReport rep_masked, rep_mask;
-        memset(&rep_masked, 0, sizeof(rep_masked));
-        memset(&rep_mask, 0, sizeof(rep_mask));
-        bool children_ok = true;
+        // Same fused commit as the signer: one expander scan for both
+        // polynomials, then one Merkle tree each. Openings stay serial;
+        // drop each poly before regenerating the next to cut peak RSS.
+        printf("Running fused mask commit...\n");
+        prime_field::field_element *masked_poly =
+            truepix::alloc_masked_from_seed(coefs, lay, seed);
+        prime_field::field_element *mask_poly =
+            truepix::alloc_mask_from_seed(lay, seed);
+        // Same plaintext MLE as before; keep only the scalar so coefs does not
+        // sit under the opening / EC peak.
+        prime_field::field_element mle_clear =
+            truepix::mle_gkr(coefs, r, lay.lg_n, lay.n);
+        delete[] coefs;
+        coefs = nullptr;
+        set_retain_encoded_codeword(true);
+        zk_pair_commit pc = commit_pair(masked_poly, mask_poly, lay.n);
+        delete[] mask_poly;
+        mask_poly = nullptr;
 
-        {
-            int fd[2];
-            if (pipe(fd) != 0) { perror("pipe"); return 1; }
-            pid_t pid = fork();
-            if (pid == 0) {
-                close(fd[0]);
-                printf("Running with mask...\n");
-                prime_field::field_element *poly =
-                    truepix::alloc_masked_from_seed(coefs, lay.n, seed);
-                truepix::OpenReport rep = truepix_commit_and_open(
-                    poly, lay.n, lay.lg_n, r_orion, true,
-                    manifest.masked_root, "transmitted_data_mask.txt", "masked");
-                delete[] poly;
-                ssize_t wrote = write(fd[1], &rep, sizeof(rep));
-                close(fd[1]);
-                fflush(stdout);
-                _exit(wrote == (ssize_t)sizeof(rep) ? 0 : 1);
-            }
-            close(fd[1]);
-            bool got = read(fd[0], &rep_masked, sizeof(rep_masked)) == (ssize_t)sizeof(rep_masked);
-            close(fd[0]);
-            int st = 0;
-            waitpid(pid, &st, 0);
-            if (!got || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
-                children_ok = false;
-                fprintf(stderr, "TruePix: masked opening child failed\n");
-            }
-        }
-        {
-            int fd[2];
-            if (pipe(fd) != 0) { perror("pipe"); return 1; }
-            pid_t pid = fork();
-            if (pid == 0) {
-                close(fd[0]);
-                printf("Running without mask...\n");
-                prime_field::field_element *poly =
-                    truepix::alloc_mask_from_seed(lay.n, seed);
-                truepix::OpenReport rep = truepix_commit_and_open(
-                    poly, lay.n, lay.lg_n, r_orion, false,
-                    manifest.mask_root, "transmitted_data_masked.txt", "mask");
-                delete[] poly;
-                ssize_t wrote = write(fd[1], &rep, sizeof(rep));
-                close(fd[1]);
-                fflush(stdout);
-                _exit(wrote == (ssize_t)sizeof(rep) ? 0 : 1);
-            }
-            close(fd[1]);
-            bool got = read(fd[0], &rep_mask, sizeof(rep_mask)) == (ssize_t)sizeof(rep_mask);
-            close(fd[0]);
-            int st = 0;
-            waitpid(pid, &st, 0);
-            if (!got || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
-                children_ok = false;
-                fprintf(stderr, "TruePix: mask opening child failed\n");
-            }
-        }
+        bind_open_message(masked_poly, lay.n);
+        delete[] masked_poly;
+        masked_poly = nullptr;
+        truepix::OpenReport rep_masked = truepix_open_after_pair(
+            nullptr, lay.n, lay.lg_n, r_orion, true, pc.mt_masked,
+            manifest.masked_root, "transmitted_data_mask.txt", "masked");
+
+        mask_poly = truepix::alloc_mask_from_seed(lay, seed);
+        bind_open_message(mask_poly, lay.n);
+        delete[] mask_poly;
+        mask_poly = nullptr;
+        truepix::OpenReport rep_mask = truepix_open_after_pair(
+            nullptr, lay.n, lay.lg_n, r_orion, false, pc.mt_mask,
+            manifest.mask_root, "transmitted_data_masked.txt", "mask");
+        free(pc.mt_masked);
+        free(pc.mt_mask);
+        bool children_ok = true;
 
         prime_field::field_element v_masked, v_mask;
         v_masked.real = rep_masked.real;
@@ -417,7 +384,7 @@ int main(int argc, char* argv[]) {
         v_mask.real = rep_mask.real;
         v_mask.img = rep_mask.img;
         prime_field::field_element value = v_masked - v_mask;
-        bool consistent = (value == truepix::mle_gkr(coefs, r, lay.lg_n, lay.n));
+        bool consistent = (value == mle_clear);
 
         bool ok = children_ok && rep_masked.open_ok && rep_mask.open_ok &&
                   rep_masked.root_ok && rep_mask.root_ok && consistent;
@@ -427,7 +394,6 @@ int main(int argc, char* argv[]) {
                rep_mask.root_ok, (int)consistent, (int)ok);
         printf(ok ? "check pass\n" : "check notpass\n");
 
-        delete[] coefs;
         delete[] r;
         delete[] r_orion;
         fflush(stdout);

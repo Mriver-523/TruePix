@@ -226,6 +226,53 @@ static truepix::OpenReport truepix_commit_and_open(
     return rep;
 }
 
+// NIZK verify-only: check proof blob against the commit-phase Merkle root.
+static truepix::OpenReport truepix_verify_nizk_opening(
+    prime_field::field_element *r_orion,
+    long long N,
+    int lg_N,
+    bool use_group1,
+    const std::string& expected_root_hex,
+    const char *proof_file,
+    const char *label)
+{
+    truepix::OpenReport rep;
+    rep.open_ok = 0;
+    rep.root_ok = 0;
+    rep.real = 0;
+    rep.img = 0;
+
+    __hhash_digest expected_root;
+    memset(&expected_root, 0, sizeof(expected_root));
+    if (!truepix::root_from_hex(expected_root_hex, expected_root)) {
+        fprintf(stderr, "TruePix: %s invalid root hex in manifest\n", label);
+        return rep;
+    }
+    rep.root_ok = 1;
+
+    timer_mark(open_t0);
+    auto result = verify_opening_proof(
+        r_orion, lg_N, (int)N, expected_root, use_group1, proof_file);
+    timer_mark(open_t1);
+    printf("Open time(%s): %lf\n", label, time_diff(open_t0, open_t1));
+    printf("Result: %s\n", result.second ? "succ" : "fail");
+
+    rep.open_ok = result.second ? 1 : 0;
+    rep.real = result.first.real;
+    rep.img = result.first.img;
+    return rep;
+}
+
+static bool orion_mode_is_nizk()
+{
+    // Default NIZK; only explicit interactive opts out.
+    const char *m = getenv("TRUEPIX_ORION_MODE");
+    if (m && (strcmp(m, "interactive") == 0 || strcmp(m, "INTERACTIVE") == 0 ||
+              strcmp(m, "interact") == 0))
+        return false;
+    return true;
+}
+
 // Read macroblock data (Y, Cb, Cr values) from file
 void read_macroblock_data(const std::string& filename, std::vector<int>& y_values, 
                          std::vector<int>& cb_values, std::vector<int>& cr_values, 
@@ -321,7 +368,7 @@ int main(int argc, char* argv[]) {
     if (use_gkr_layout) {
         // Align with Fennel GKR: copy-major-384-const128-pad512-v1
         if (userandom) {
-            fprintf(stderr, "truepix requires shared input.txt (userandom=0)\n");
+            fprintf(stderr, "fp2-linked-v1 requires shared input.txt (userandom=0)\n");
             return 1;
         }
         if (!truepix::make_layout(C, lay)) {
@@ -454,6 +501,39 @@ int main(int argc, char* argv[]) {
         prime_field::field_element *r_orion = new prime_field::field_element[lg_N];
         truepix::reverse_point(r, r_orion, lg_N);
 
+        truepix::OpenReport rep_masked, rep_mask;
+        memset(&rep_masked, 0, sizeof(rep_masked));
+        memset(&rep_mask, 0, sizeof(rep_mask));
+        bool children_ok = true;
+        prime_field::field_element mle_clear;
+        bool mle_ready = false;
+        double mle_seconds = 0.0;
+
+        if (orion_mode_is_nizk()) {
+            // Openings do not read coefs. Evaluate the plaintext MLE first so
+            // the 16MiB vector is gone before the two EC/FRI passes.
+            timer_mark(mle_early);
+            mle_clear = truepix::mle_gkr(coefs, r, lg_N, N);
+            timer_mark(mle_early_end);
+            mle_seconds = time_diff(mle_early, mle_early_end);
+            delete[] coefs;
+            coefs = nullptr;
+            mle_ready = true;
+        }
+
+        if (orion_mode_is_nizk()) {
+            // Prove phase already wrote orion_proof_{masked,mask}.bin.
+            // Verifier only needs the commitment roots + proof blobs.
+            fflush(stdout);
+            printf("Running with mask...\n");
+            rep_masked = truepix_verify_nizk_opening(
+                r_orion, N, lg_N, true, manifest.masked_root,
+                "orion_proof_masked.bin", "masked");
+            printf("Running without mask...\n");
+            rep_mask = truepix_verify_nizk_opening(
+                r_orion, N, lg_N, false, manifest.mask_root,
+                "orion_proof_mask.bin", "mask");
+        } else {
         // Serial openings in isolated child processes (wait for each to finish
         // before starting the next). Orion's open path mutates process-global
         // prover/verifier state; running both opens in one address space
@@ -461,11 +541,6 @@ int main(int argc, char* argv[]) {
         // Parent keeps only coefs (+point); children rebuild mask/masked from seed.
         fflush(stdout);
         setvbuf(stdout, nullptr, _IOLBF, 0);
-
-        truepix::OpenReport rep_masked, rep_mask;
-        memset(&rep_masked, 0, sizeof(rep_masked));
-        memset(&rep_mask, 0, sizeof(rep_mask));
-        bool children_ok = true;
 
         {
             int fd[2];
@@ -476,7 +551,7 @@ int main(int argc, char* argv[]) {
                 setvbuf(stdout, nullptr, _IOLBF, 0);
                 printf("Running with mask...\n");
                 prime_field::field_element *poly =
-                    truepix::alloc_masked_from_seed(coefs, N, gkr_mask_seed);
+                    truepix::alloc_masked_from_seed(coefs, lay, gkr_mask_seed);
                 truepix::OpenReport rep = truepix_commit_and_open(
                     poly, N, lg_N, r_orion, true,
                     manifest.masked_root, "transmitted_data_mask.txt", "masked");
@@ -505,7 +580,7 @@ int main(int argc, char* argv[]) {
                 setvbuf(stdout, nullptr, _IOLBF, 0);
                 printf("Running without mask...\n");
                 prime_field::field_element *poly =
-                    truepix::alloc_mask_from_seed(N, gkr_mask_seed);
+                    truepix::alloc_mask_from_seed(lay, gkr_mask_seed);
                 truepix::OpenReport rep = truepix_commit_and_open(
                     poly, N, lg_N, r_orion, false,
                     manifest.mask_root, "transmitted_data_masked.txt", "mask");
@@ -525,6 +600,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "TruePix: mask opening child failed\n");
             }
         }
+        } // interactive
 
         // The value bound to the GKR claim is the difference of the two
         // *verified* openings, not a plaintext evaluation of input.txt.
@@ -537,16 +613,19 @@ int main(int argc, char* argv[]) {
 
         // Cross-check against the plaintext MLE. This is a self-test of the
         // point reversal and the packing, not the source of the value.
-        timer_mark(mle_start);
-        auto a_clear = truepix::mle_gkr(coefs, r, lg_N, N);
-        timer_mark(mle_end);
-        bool consistent = (value == a_clear);
+        if (!mle_ready) {
+            timer_mark(mle_start);
+            mle_clear = truepix::mle_gkr(coefs, r, lg_N, N);
+            timer_mark(mle_end);
+            mle_seconds = time_diff(mle_start, mle_end);
+        }
+        bool consistent = (value == mle_clear);
         if (!consistent) {
             fprintf(stderr, "TruePix: verified opening %llu+%llui disagrees with the "
                             "plaintext MLE %llu+%llui\n",
-                    value.real, value.img, a_clear.real, a_clear.img);
+                    value.real, value.img, mle_clear.real, mle_clear.img);
         }
-        printf("MLE evaluation time %f\n", time_diff(mle_start, mle_end));
+        printf("MLE evaluation time %f\n", mle_seconds);
 
         bool ok = children_ok && rep_masked.open_ok && rep_mask.open_ok &&
                   rep_masked.root_ok && rep_mask.root_ok && consistent;

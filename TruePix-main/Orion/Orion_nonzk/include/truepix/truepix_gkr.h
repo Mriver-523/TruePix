@@ -1,6 +1,6 @@
 #pragma once
 //
-// TruePix protocol truepix: shared input layout, deterministic mask and
+// TruePix protocol fp2-linked-v1: shared input layout, deterministic mask and
 // commitment manifest.
 //
 // The commit / prove / open example binaries all include this header so that
@@ -31,14 +31,28 @@
 
 namespace truepix {
 
-const char *const PROTOCOL_ID = "truepix";
+const char *const PROTOCOL_ID = "fp2-linked-v1";
+const char *const PROTOCOL_ID_ALIAS = "truepix";
 const char *const LAYOUT_ID = "copy-major-384-const128-pad512-v1";
 const int PADDED_COPY_SIZE = 512;
+
+inline bool protocol_matches(const std::string &p)
+{
+    return p == PROTOCOL_ID || p == PROTOCOL_ID_ALIAS;
+}
 
 inline bool enabled()
 {
     const char *e = getenv("TRUEPIX_PROTOCOL");
-    return e != nullptr && std::string(e) == PROTOCOL_ID;
+    return e != nullptr && protocol_matches(e);
+}
+
+inline const char *protocol_name_for_io()
+{
+    const char *e = getenv("TRUEPIX_PROTOCOL");
+    if (e != nullptr && protocol_matches(e))
+        return e;
+    return PROTOCOL_ID;
 }
 
 inline std::string env_or(const char *name, const char *fallback)
@@ -350,6 +364,25 @@ inline std::string root_hex(const __hhash_digest &d)
     return std::string(buf, 64);
 }
 
+inline bool root_from_hex(const std::string &hex, __hhash_digest &d)
+{
+    if (hex.size() != 64)
+        return false;
+    unsigned long long parts[4];
+    for (int i = 0; i < 4; ++i) {
+        char buf[17];
+        memcpy(buf, hex.data() + i * 16, 16);
+        buf[16] = '\0';
+        char *end = nullptr;
+        parts[i] = strtoull(buf, &end, 16);
+        if (end != buf + 16)
+            return false;
+    }
+    d.h0 = _mm_set_epi64x((long long)parts[0], (long long)parts[1]);
+    d.h1 = _mm_set_epi64x((long long)parts[2], (long long)parts[3]);
+    return true;
+}
+
 inline std::string manifest_path()
 {
     return env_or("TRUEPIX_ORION_COMMIT_FILE", "orion_commit.json");
@@ -365,7 +398,7 @@ inline bool write_manifest(const Layout &lay, const std::string &masked_root,
         return false;
     }
     out << "{\n";
-    out << "  \"protocol\": \"" << PROTOCOL_ID << "\",\n";
+    out << "  \"protocol\": \"" << protocol_name_for_io() << "\",\n";
     out << "  \"layout\": \"" << LAYOUT_ID << "\",\n";
     out << "  \"zk\": " << (zk ? "true" : "false") << ",\n";
     out << "  \"copies\": " << lay.copies << ",\n";
@@ -455,7 +488,7 @@ inline bool read_manifest(Manifest &out)
         return false;
     }
     find_bool("zk", out.zk);
-    if (protocol != PROTOCOL_ID || layout != LAYOUT_ID) {
+    if (!protocol_matches(protocol) || layout != LAYOUT_ID) {
         fprintf(stderr, "TruePix: commit manifest %s has protocol=%s layout=%s\n",
                 path.c_str(), protocol.c_str(), layout.c_str());
         return false;

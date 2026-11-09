@@ -22,6 +22,7 @@ namespace fri
 				merkle[i] = NULL;
 				rs_codeword[i] = NULL;
 				poly_coef[i] = NULL;
+				rs_codeword_mapping[i] = NULL;
 				merkle_size[i] = 0;
 			}
 		}
@@ -36,9 +37,12 @@ namespace fri
 					delete[] rs_codeword[i];
 				if(poly_coef[i] != NULL)
 					delete[] poly_coef[i];
+				if(rs_codeword_mapping[i] != NULL)
+					delete[] rs_codeword_mapping[i];
 				merkle[i] = NULL;
 				rs_codeword[i] = NULL;
 				poly_coef[i] = NULL;
+				rs_codeword_mapping[i] = NULL;
 				merkle_size[i] = 0;
 			}
 		}

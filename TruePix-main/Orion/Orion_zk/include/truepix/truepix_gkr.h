@@ -1,6 +1,6 @@
 #pragma once
 //
-// TruePix protocol truepix: shared input layout, deterministic mask and
+// TruePix protocol fp2-linked-v1: shared input layout, deterministic mask and
 // commitment manifest.
 //
 // The commit / prove / open example binaries all include this header so that
@@ -31,14 +31,28 @@
 
 namespace truepix {
 
-const char *const PROTOCOL_ID = "truepix";
+const char *const PROTOCOL_ID = "fp2-linked-v1";
+const char *const PROTOCOL_ID_ALIAS = "truepix";
 const char *const LAYOUT_ID = "copy-major-384-const128-pad512-v1";
 const int PADDED_COPY_SIZE = 512;
+
+inline bool protocol_matches(const std::string &p)
+{
+    return p == PROTOCOL_ID || p == PROTOCOL_ID_ALIAS;
+}
 
 inline bool enabled()
 {
     const char *e = getenv("TRUEPIX_PROTOCOL");
-    return e != nullptr && std::string(e) == PROTOCOL_ID;
+    return e != nullptr && protocol_matches(e);
+}
+
+inline const char *protocol_name_for_io()
+{
+    const char *e = getenv("TRUEPIX_PROTOCOL");
+    if (e != nullptr && protocol_matches(e))
+        return e;
+    return PROTOCOL_ID;
 }
 
 inline std::string env_or(const char *name, const char *fallback)
@@ -323,34 +337,48 @@ inline unsigned long long splitmix64(unsigned long long &state)
     return z ^ (z >> 31);
 }
 
-inline void fill_mask(prime_field::field_element *mask, long long n,
+// Private wires are the copy_size values read from input.txt in each real copy.
+// The constant wire, the zero pad inside a copy, and the padded copies are
+// public, so the mask leaves them at 0. Imaginary parts stay 0: every witness
+// coefficient is real. Only the private real parts are uniform in the field.
+inline bool mask_hides_index(const Layout &lay, long long index)
+{
+    const int copy = (int)(index / lay.padded_copy_size);
+    const int wire = (int)(index % lay.padded_copy_size);
+    return copy < lay.copies && wire < lay.copy_size;
+}
+
+inline void fill_mask(prime_field::field_element *mask, const Layout &lay,
                       unsigned long long seed)
 {
     unsigned long long state = seed;
-    for (long long i = 0; i < n; ++i) {
+    for (long long i = 0; i < lay.n; ++i) {
+        mask[i].real = 0;
+        mask[i].img = 0;
+        if (!mask_hides_index(lay, i))
+            continue;
         mask[i].real = splitmix64(state) % prime_field::mod;
-        mask[i].img = splitmix64(state) % prime_field::mod;
     }
 }
 
 // Build mask or masked polynomials from the commit-phase seed. Callers (esp.
 // forked Orion children) should use these instead of keeping both arrays in
 // the parent process for the whole lifetime.
-inline prime_field::field_element *alloc_mask_from_seed(long long n,
+inline prime_field::field_element *alloc_mask_from_seed(const Layout &lay,
                                                        unsigned long long seed)
 {
-    auto *mask = new prime_field::field_element[n];
-    fill_mask(mask, n, seed);
+    auto *mask = new prime_field::field_element[lay.n];
+    fill_mask(mask, lay, seed);
     return mask;
 }
 
 inline prime_field::field_element *alloc_masked_from_seed(
-    const prime_field::field_element *coefs, long long n,
+    const prime_field::field_element *coefs, const Layout &lay,
     unsigned long long seed)
 {
-    auto *poly = new prime_field::field_element[n];
-    fill_mask(poly, n, seed);
-    for (long long i = 0; i < n; ++i) {
+    auto *poly = new prime_field::field_element[lay.n];
+    fill_mask(poly, lay, seed);
+    for (long long i = 0; i < lay.n; ++i) {
         poly[i] = coefs[i] + poly[i];
     }
     return poly;
@@ -373,6 +401,25 @@ inline std::string root_hex(const __hhash_digest &d)
     return std::string(buf, 64);
 }
 
+inline bool root_from_hex(const std::string &hex, __hhash_digest &d)
+{
+    if (hex.size() != 64)
+        return false;
+    unsigned long long parts[4];
+    for (int i = 0; i < 4; ++i) {
+        char buf[17];
+        memcpy(buf, hex.data() + i * 16, 16);
+        buf[16] = '\0';
+        char *end = nullptr;
+        parts[i] = strtoull(buf, &end, 16);
+        if (end != buf + 16)
+            return false;
+    }
+    d.h0 = _mm_set_epi64x((long long)parts[0], (long long)parts[1]);
+    d.h1 = _mm_set_epi64x((long long)parts[2], (long long)parts[3]);
+    return true;
+}
+
 inline std::string manifest_path()
 {
     return env_or("TRUEPIX_ORION_COMMIT_FILE", "orion_commit.json");
@@ -388,7 +435,7 @@ inline bool write_manifest(const Layout &lay, const std::string &masked_root,
         return false;
     }
     out << "{\n";
-    out << "  \"protocol\": \"" << PROTOCOL_ID << "\",\n";
+    out << "  \"protocol\": \"" << protocol_name_for_io() << "\",\n";
     out << "  \"layout\": \"" << LAYOUT_ID << "\",\n";
     out << "  \"zk\": " << (zk ? "true" : "false") << ",\n";
     out << "  \"copies\": " << lay.copies << ",\n";
@@ -478,7 +525,7 @@ inline bool read_manifest(Manifest &out)
         return false;
     }
     find_bool("zk", out.zk);
-    if (protocol != PROTOCOL_ID || layout != LAYOUT_ID) {
+    if (!protocol_matches(protocol) || layout != LAYOUT_ID) {
         fprintf(stderr, "TruePix: commit manifest %s has protocol=%s layout=%s\n",
                 path.c_str(), protocol.c_str(), layout.c_str());
         return false;

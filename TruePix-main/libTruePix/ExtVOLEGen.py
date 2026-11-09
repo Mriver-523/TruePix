@@ -11,30 +11,43 @@ Legacy VOLEGen.py is left unchanged.
 
 from __future__ import annotations
 
+import secrets
+import struct
 from array import array
 from typing import List, Optional, Tuple
 
 from libTruePix.extfield import BASE_PRIME_61, Fp2
 
+# SD circuits here consume about 100 correlations. 500 leaves headroom
+# without writing the old 100000-instance JSON pool every run.
+DEFAULT_VOLE_INSTANCES = 500
 
-def _write_coord_streams(fh, streams: List[Tuple[array, array]], indent: str = "  "):
-    """Write JSON list-of-streams of [real, imag] pairs without a giant Python tree."""
-    fh.write("[\n")
-    for si, (re, im) in enumerate(streams):
-        n = len(re)
-        fh.write(indent + "[")
-        for j in range(n):
-            if j:
-                fh.write(",")
-            # Compact single-line pairs keep file size similar to json.dump.
-            fh.write(f"[{re[j]},{im[j]}]")
-            if (j & 0x3FF) == 0x3FF:
-                fh.write("\n" + indent)
-        fh.write("]")
-        if si + 1 < len(streams):
-            fh.write(",")
-        fh.write("\n")
-    fh.write("]")
+_MAGIC = b"EVOL"
+_VERSION = 1
+_ROLE_PROVER = 1
+_ROLE_VERIFIER = 2
+_HEADER = struct.Struct("<4sIIIIQ")
+
+
+def _rand_nonzero(p: int) -> Tuple[int, int]:
+    while True:
+        real = secrets.randbelow(p)
+        imag = secrets.randbelow(p)
+        if real or imag:
+            return real, imag
+
+
+def _write_array(fh, values: array) -> None:
+    fh.write(values.tobytes())
+
+
+def _read_array(fh, n: int) -> array:
+    raw = fh.read(n * 8)
+    if len(raw) != n * 8:
+        raise ValueError("truncated VOLE file")
+    out = array("Q")
+    out.frombytes(raw)
+    return out
 
 
 class ExtVOLEGenerator:
@@ -84,18 +97,18 @@ class ExtVOLEGenerator:
             pr = array("Q", [0]) * num_instances
             pi = array("Q", [0]) * num_instances
             for i in range(num_instances):
-                u = Fp2.random(p, nonzero=True)
-                v = Fp2.random(p, nonzero=True)
-                # p = u*delta + v  (inline to avoid a third Fp2 temporary living in a list)
+                ure, uim = _rand_nonzero(p)
+                vre, vim = _rand_nonzero(p)
+                # p = u*delta + v
                 # (ur+ui*i)(dr+di*i) = (ur*dr - ui*di) + (ur*di + ui*dr)*i
-                t0 = (u.real * dr - u.imag * di) % p
-                t1 = (u.real * di + u.imag * dr) % p
-                ur[i] = u.real
-                ui[i] = u.imag
-                vr[i] = v.real
-                vi[i] = v.imag
-                pr[i] = (t0 + v.real) % p
-                pi[i] = (t1 + v.imag) % p
+                t0 = (ure * dr - uim * di) % p
+                t1 = (ure * di + uim * dr) % p
+                ur[i] = ure
+                ui[i] = uim
+                vr[i] = vre
+                vi[i] = vim
+                pr[i] = (t0 + vre) % p
+                pi[i] = (t1 + vim) % p
             self.u_re.append(ur)
             self.u_im.append(ui)
             self.v_re.append(vr)
@@ -117,32 +130,58 @@ class ExtVOLEGenerator:
     def save_to_files(self, prover_file: str, verifier_file: str, session_id: str = ""):
         if not self.deltas or not self.u_re:
             raise ValueError("No VOLE instances generated yet")
+        del session_id  # binary header has no session string
+        n = len(self.u_re[0])
+        reps = self.security_repetitions
+        with open(prover_file, "wb") as fh:
+            fh.write(_HEADER.pack(_MAGIC, _VERSION, _ROLE_PROVER, reps, n, self.base_prime))
+            for re, im in zip(self.u_re, self.u_im):
+                _write_array(fh, re)
+                _write_array(fh, im)
+            for re, im in zip(self.v_re, self.v_im):
+                _write_array(fh, re)
+                _write_array(fh, im)
+        with open(verifier_file, "wb") as fh:
+            fh.write(_HEADER.pack(_MAGIC, _VERSION, _ROLE_VERIFIER, reps, n, self.base_prime))
+            deltas = array("Q")
+            for d in self.deltas:
+                deltas.append(d.real)
+                deltas.append(d.imag)
+            _write_array(fh, deltas)
+            for re, im in zip(self.p_re, self.p_im):
+                _write_array(fh, re)
+                _write_array(fh, im)
 
-        # Stream JSON so we never hold a nested [[[r,i],...]] Python tree
-        # alongside the compact arrays (that duplication was a major RSS spike).
-        with open(prover_file, "w") as fh:
-            fh.write("{\n")
-            fh.write(f'"protocol":"{self.PROTOCOL}",\n')
-            fh.write(f'"field":"{self.FIELD_ID}",\n')
-            fh.write(f'"base_prime":{self.base_prime},\n')
-            fh.write(f'"security_repetitions":{self.security_repetitions},\n')
-            fh.write(f'"session_id":"{session_id}",\n')
-            fh.write('"u":')
-            _write_coord_streams(fh, list(zip(self.u_re, self.u_im)))
-            fh.write(',\n"v":')
-            _write_coord_streams(fh, list(zip(self.v_re, self.v_im)))
-            fh.write("\n}\n")
 
-        with open(verifier_file, "w") as fh:
-            fh.write("{\n")
-            fh.write(f'"protocol":"{self.PROTOCOL}",\n')
-            fh.write(f'"field":"{self.FIELD_ID}",\n')
-            fh.write(f'"base_prime":{self.base_prime},\n')
-            fh.write(f'"security_repetitions":{self.security_repetitions},\n')
-            fh.write(f'"session_id":"{session_id}",\n')
-            fh.write('"delta":[')
-            fh.write(",".join(f"[{d.real},{d.imag}]" for d in self.deltas))
-            fh.write("],\n")
-            fh.write('"p":')
-            _write_coord_streams(fh, list(zip(self.p_re, self.p_im)))
-            fh.write("\n}\n")
+def read_vole_file(filename: str):
+    """Load a binary VOLE file. Returns None when the file is legacy JSON."""
+    with open(filename, "rb") as fh:
+        prefix = fh.read(4)
+        if prefix != _MAGIC:
+            return None
+        rest = fh.read(_HEADER.size - 4)
+        if len(rest) != _HEADER.size - 4:
+            raise ValueError("truncated VOLE header")
+        _magic, version, role, reps, n, base_prime = _HEADER.unpack(prefix + rest)
+        if version != _VERSION:
+            raise ValueError("unsupported VOLE file version %s" % version)
+        deltas = []
+        streams = []
+        if role == _ROLE_VERIFIER:
+            raw = _read_array(fh, reps * 2)
+            deltas = [(raw[2 * i], raw[2 * i + 1]) for i in range(reps)]
+            nstreams = 1
+        elif role == _ROLE_PROVER:
+            nstreams = 2
+        else:
+            raise ValueError("unknown VOLE role %s" % role)
+        for _ in range(reps * nstreams):
+            streams.append((_read_array(fh, n), _read_array(fh, n)))
+    return {
+        "role": role,
+        "security_repetitions": reps,
+        "n": n,
+        "base_prime": base_prime,
+        "deltas": deltas,
+        "streams": streams,
+    }

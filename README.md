@@ -33,7 +33,7 @@ pip install -r requirements.txt
 ## Build
 
 After installing the prerequisites, run the following setup script from the
-**repository root**. It builds the Hyrax native libraries, Orion binaries,
+**repository root**. It builds the native libraries, Orion binaries,
 `native_fp2`, and `fft_gkr`.
 
 ```bash

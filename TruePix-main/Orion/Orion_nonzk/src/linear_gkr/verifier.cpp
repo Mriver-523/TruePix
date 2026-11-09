@@ -5,6 +5,7 @@
 #include <iostream>
 #include "linear_gkr/random_generator.h"
 #include "VPD/vpd_verifier.h"
+#include "truepix/orion_fs.h"
 
 using namespace std;
 
@@ -919,15 +920,8 @@ void zk_verifier::beta_init(int depth, prime_field::field_element alpha, prime_f
 
 prime_field::field_element* generate_randomness(unsigned int size)
 {
-	int k = size;
-	prime_field::field_element* ret;
-	ret = new prime_field::field_element[k];
-
-	for(int i = 0; i < k; ++i)
-	{
-		ret[i] = prime_field::random();
-	}
-	return ret;
+	// NIZK mode: Fiat--Shamir via truepix_orion; interactive: legacy RNG.
+	return truepix_orion::orion_challenge_fields(size);
 }
 
 prime_field::field_element zk_verifier::V_in(const prime_field::field_element* r_0, const prime_field::field_element* one_minus_r_0,

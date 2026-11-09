@@ -15,13 +15,29 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 from libTruePix.extfield import BASE_PRIME_61, Fp2, _raw
 
-# Set False to force the existing CPU path even when a GPU is available.
-ENABLE_GPU = True
+def _env_enable_gpu() -> bool:
+    """TRUEPIX_ENABLE_GPU selects the GKR backend at runtime.
+
+    unset / 1 / true / yes / on  -> use GPU kernels when the device and
+                                    libnative_fp2_gpu.so are available
+    0 / false / no / off         -> force the CPU library (same path as 3s)
+    """
+    v = os.environ.get("TRUEPIX_ENABLE_GPU", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on", ""):
+        return True
+    return True
+
+
+# Overridden by TruePix.sh --gpu / --no-gpu via TRUEPIX_ENABLE_GPU.
+ENABLE_GPU = _env_enable_gpu()
 
 _LIB = None
 _GPU_LIB = None
 AVAILABLE = False
 GPU_ACTIVE = False
+GPU_FAIL_REASON = ""
 
 _U64 = ctypes.c_uint64
 _I32 = ctypes.c_int
@@ -98,45 +114,70 @@ def _bind_early(lib) -> None:
 
 
 def _load():
-    global _LIB, _GPU_LIB, AVAILABLE, GPU_ACTIVE
+    global _LIB, _GPU_LIB, AVAILABLE, GPU_ACTIVE, GPU_FAIL_REASON
     here = os.path.dirname(os.path.realpath(__file__))
     libdir = os.path.normpath(os.path.join(here, "..", "native_fp2", "lib"))
     cpu_path = os.path.join(libdir, "libnative_fp2.so")
     if not os.path.isfile(cpu_path):
         AVAILABLE = False
+        GPU_FAIL_REASON = "missing %s" % cpu_path
         return
     lib = ctypes.CDLL(cpu_path)
     lib.native_fp2_init.restype = ctypes.c_int
     lib.native_fp2_init.argtypes = []
     if lib.native_fp2_init() != 0:
         AVAILABLE = False
+        GPU_FAIL_REASON = "native_fp2_init failed on CPU library"
         return
     _bind_batch(lib)
     _LIB = lib
     AVAILABLE = True
 
     if not ENABLE_GPU:
+        GPU_FAIL_REASON = "TRUEPIX_ENABLE_GPU disabled"
         return
     gpu_path = os.path.join(libdir, "libnative_fp2_gpu.so")
     if not os.path.isfile(gpu_path):
+        GPU_FAIL_REASON = "missing %s" % gpu_path
         return
+    # CUDA runtimes must be visible with RTLD_GLOBAL; RTLD_LOCAL dlopen of
+    # libnative_fp2_gpu.so often leaves cudaGetDeviceCount/SetDevice failing
+    # even when a direct cudart probe in the same process succeeds.
     try:
-        gpu = ctypes.CDLL(gpu_path)
+        ctypes.CDLL("libcudart.so.12", mode=ctypes.RTLD_GLOBAL)
     except OSError:
+        try:
+            ctypes.CDLL("libcudart.so", mode=ctypes.RTLD_GLOBAL)
+        except OSError as exc:
+            GPU_FAIL_REASON = "preload libcudart failed: %s" % exc
+            return
+    try:
+        gpu = ctypes.CDLL(gpu_path, mode=ctypes.RTLD_GLOBAL)
+    except OSError as exc:
+        GPU_FAIL_REASON = "dlopen(%s) failed: %s" % (gpu_path, exc)
         return
     gpu.native_fp2_init.restype = ctypes.c_int
     gpu.native_fp2_init.argtypes = []
     if not hasattr(gpu, "native_fp2_cuda_available") or not hasattr(gpu, "native_fp2_early_create"):
+        GPU_FAIL_REASON = "GPU library missing cuda_available/early_create"
         return
     gpu.native_fp2_cuda_available.restype = ctypes.c_int
     gpu.native_fp2_cuda_available.argtypes = []
-    if gpu.native_fp2_init() != 0 or not gpu.native_fp2_cuda_available():
+    if gpu.native_fp2_init() != 0:
+        GPU_FAIL_REASON = "native_fp2_init failed on GPU library"
+        return
+    if not gpu.native_fp2_cuda_available():
+        GPU_FAIL_REASON = (
+            "GPU library cuda_available=0 after init "
+            "(device busy in Exclusive Process, or CUDA init failed inside .so)"
+        )
         return
     _bind_batch(gpu)
     _bind_early(gpu)
     _GPU_LIB = gpu
     _LIB = gpu
     GPU_ACTIVE = True
+    GPU_FAIL_REASON = ""
 
 
 _load()

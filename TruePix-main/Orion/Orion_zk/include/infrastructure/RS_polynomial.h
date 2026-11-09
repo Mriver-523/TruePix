@@ -8,6 +8,7 @@
 #include "infrastructure/constants.h"
 
 void init_scratch_pad(long long order);
+void delete_scratch_pad();
 
 extern prime_field::field_element* twiddle_factor;
 

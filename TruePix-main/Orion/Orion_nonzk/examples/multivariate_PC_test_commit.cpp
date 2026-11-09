@@ -125,7 +125,7 @@ int main(int argc, char* argv[]) {
 
     if (truepix::enabled()) {
         if (userandom) {
-            fprintf(stderr, "truepix requires shared input.txt (userandom=0)\n");
+            fprintf(stderr, "fp2-linked-v1 requires shared input.txt (userandom=0)\n");
             return 1;
         }
         truepix::Layout lay;
@@ -138,17 +138,17 @@ int main(int argc, char* argv[]) {
         }
         expander_init(lay.n / column_size);
 
+        // Same retain path as prove recommit: keep compact encoded matrix
+        // for the commit phase (process-local; not reused by prove).
+        set_retain_encoded_codeword(true);
         timer_mark(commit_t0);
         auto h = commit(coefs, lay.n);
         timer_mark(commit_t1);
         printf("Commit time %lf\n", time_diff(commit_t0, commit_t1));
 
         const std::string root = truepix::root_hex(h[1]);
-        long long size_after_padding = 1;
-        while (size_after_padding < lay.n / column_size * 2)
-            size_after_padding *= 2;
-        int h_length = size_after_padding * 2;
-        write_transmitted_data_commit(h, h_length, "transmitted_data.txt");
+        // fp2 signs orion_commit.json. The hex Merkle dump is only for the
+        // legacy interactive path below.
         bool ok = truepix::write_manifest(lay, root, "", false);
         delete[] coefs;
         return ok ? 0 : 1;
@@ -210,6 +210,7 @@ int main(int argc, char* argv[]) {
         coefs[index++] = prime_field::field_element(0);
     }
 
+    set_retain_encoded_codeword(true);
     timer_mark(commit_t0);
     auto h = commit(coefs, N);
     timer_mark(commit_t1);

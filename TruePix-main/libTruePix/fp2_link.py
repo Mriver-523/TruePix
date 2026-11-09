@@ -26,6 +26,11 @@ ORION_COMMIT_FILE = "orion_commit.json"
 # Prover-side secret: the seed the mask polynomial is derived from, so that the
 # commit, prove and open phases all use the same mask.
 ORION_MASK_SEED_FILE = "orion_mask_seed.txt"
+ORION_PROOF_FILE = "orion_proof.bin"
+ORION_PROOF_MASKED_FILE = "orion_proof_masked.bin"
+ORION_PROOF_MASK_FILE = "orion_proof_mask.bin"
+
+_PROTOCOL_ALIASES = {PROTOCOL_ID, "fp2-linked-v1", "truepix"}
 
 _MANIFEST_INT_FIELDS = (
     "copies",
@@ -77,7 +82,7 @@ def write_point_file(path: str, point: Sequence[Fp2], layout: str = LAYOUT_ID):
 def read_point_file(path: str) -> List[Fp2]:
     with open(path, "r") as fh:
         data = json.load(fh)
-    if data.get("protocol") != PROTOCOL_ID:
+    if data.get("protocol") not in _PROTOCOL_ALIASES:
         raise ValueError("point file protocol mismatch")
     return deserialize_point(data["point"], BASE_PRIME_61)
 
@@ -113,16 +118,21 @@ def parse_orion_verification_time(stdout: str) -> Optional[float]:
 
 def parse_orion_prove_time(stdout: str) -> Optional[float]:
     """
-    Sum all 'Open time' lines from Orion prove/open.
+    Sum Orion prove/open wall time for Input Prove Time:
+      internal Commit time(s) + Open time(s).
 
-    Non-ZK prints one line; ZK masked+mask openings print two, and Input Prove
-    Time should count both. Streaming re-encode is reported separately as
-    'Encode preprocess time' and is already excluded from Open time.
+    The prove binary re-commits before opening; that commit cost is part of the
+    prove-phase work and is included here. Signer-phase Input Commit Time is
+    reported separately and is not double-counted (different process stdout).
+
+    Non-ZK prints one Commit + one Open. ZK prints one fused Commit time(mask)
+    (both polynomials) plus two Open times. Streaming re-encode is reported as
+    'Encode preprocess time' and is already excluded from the printed Open time.
     """
     total = 0.0
     found = False
     for line in stdout.splitlines():
-        if "Open time" not in line:
+        if "Open time" not in line and "Commit time" not in line:
             continue
         try:
             total += float(line.split()[-1])
@@ -131,26 +141,28 @@ def parse_orion_prove_time(stdout: str) -> Optional[float]:
             pass
     return total if found else None
 
-
-def parse_orion_commit_time(stdout: str) -> Optional[float]:
+def parse_orion_proof_size(stdout: str) -> Optional[int]:
     """
-    Sum all 'Commit time' lines from Orion prove (re-commit before opening).
+    Sum 'Proof size for tensor IOP' lines (PCS opening accounting).
 
-    Non-ZK prints one line; ZK prints one line per polynomial
-    (masked and mask). Input Prove Time includes these together with Open time.
+    Non-ZK prints one line; ZK masked+mask openings print two — sum both
+    rather than taking the last line times two.
+
+    Do not use ORION_NIZK_PROOF_BYTES: that is the on-disk NIZK blob
+    (columns + sparse Merkle paths etc.) and is not the historical
+    Input Proof Size.
     """
-    total = 0.0
+    total = 0
     found = False
     for line in stdout.splitlines():
-        if "Commit time" not in line:
+        if "Proof size for tensor IOP" not in line:
             continue
         try:
-            total += float(line.split()[-1])
+            total += int(line.split()[-2])
             found = True
-        except ValueError:
+        except (ValueError, IndexError):
             pass
     return total if found else None
-
 
 def vole_usage_from_commit(com) -> tuple:
     """
@@ -212,12 +224,89 @@ def generate_shared_random_input_file(
     return path
 
 
+def infer_macroblock_grid(n_copies: int, mb_width: Optional[int] = None):
+    """
+    Infer (W_blocks, H_blocks) with W_blocks * H_blocks == n_copies.
+
+    Matches VideoEdition row-major macroblock order: index = y * W + x.
+    If mb_width is unset, pick the landscape-ish factorisation closest to
+    4:3 or 16:9 (same convention used by 720x480 -> 45x30 for C=1350).
+    """
+    n_copies = int(n_copies)
+    if n_copies <= 0:
+        raise ValueError("n_copies must be positive")
+    if mb_width is not None:
+        w = int(mb_width)
+        if w <= 0 or n_copies % w != 0:
+            raise ValueError(
+                "mb_width=%s does not divide n_copies=%s" % (mb_width, n_copies)
+            )
+        return w, n_copies // w
+
+    best = None
+    best_score = None
+    for w in range(1, n_copies + 1):
+        if n_copies % w != 0:
+            continue
+        h = n_copies // w
+        ar = w / float(h)
+        score = min(abs(ar - 4.0 / 3.0), abs(ar - 16.0 / 9.0), abs(ar - 1.5))
+        if w < h:
+            score += 0.5
+        if best is None or score < best_score or (
+            abs(score - best_score) < 1e-12 and w > best[0]
+        ):
+            best = (w, h)
+            best_score = score
+    assert best is not None
+    return best
+
+
+def build_crop_bit_mask(
+    n_copies: int,
+    x_start: float,
+    x_end: float,
+    y_start: float,
+    y_end: float,
+    mb_width: Optional[int] = None,
+):
+    """
+    0/1 crop flags per macroblock, same indexing as VideoEdition.Crop.crop.
+    Coordinates are relative [0,1] windows: kept region is [x_start,x_end) x
+    [y_start,y_end) in macroblock units after int() truncation.
+    """
+    for name, val in (
+        ("x_start", x_start),
+        ("x_end", x_end),
+        ("y_start", y_start),
+        ("y_end", y_end),
+    ):
+        if not (0.0 <= float(val) <= 1.0):
+            raise ValueError("%s=%s out of [0,1]" % (name, val))
+    if float(x_end) <= float(x_start) or float(y_end) <= float(y_start):
+        raise ValueError("crop window must satisfy x_end>x_start and y_end>y_start")
+
+    w_blocks, h_blocks = infer_macroblock_grid(n_copies, mb_width)
+    xs = int(float(x_start) * w_blocks)
+    xe = int(float(x_end) * w_blocks)
+    ys = int(float(y_start) * h_blocks)
+    ye = int(float(y_end) * h_blocks)
+    bits = [0] * int(n_copies)
+    for y in range(ys, ye):
+        base = y * w_blocks
+        for x in range(xs, xe):
+            bits[base + x] = 1
+    return bits, w_blocks, h_blocks
+
+
 def prepare_random_circuit_io(
     pws_path: str,
     n_copies: int,
     input_path: str = "input.txt",
     output_path: str = "output.txt",
     value_max: int = 255,
+    crop_region: Optional[Sequence[float]] = None,
+    mb_width: Optional[int] = None,
 ):
     """
     Generate shared random input.txt + matching output.txt for truepix.
@@ -225,6 +314,11 @@ def prepare_random_circuit_io(
     Orion and GKR must see the same private input snapshot. Verifier reads
     output.txt, so we evaluate the PWS circuit once and write the public
     outputs (first 384 wires per copy; circuit pads the rest with zeros).
+
+    For Crop.pws, the last private wire is the per-macroblock keep flag.
+    Pass crop_region=(x0,x1,y0,y1) in [0,1] (same as TruePix.sh --crop) to
+    set that flag to 0/1 over a rectangle; otherwise Crop defaults to
+    (0.2, 0.8, 0.2, 0.8). Pixel channels remain uniform random in [0,value_max].
     """
     import pypws
     from libTruePix.defs import Defs
@@ -237,10 +331,36 @@ def prepare_random_circuit_io(
     if n_priv <= 0:
         raise ValueError("PWS has no private inputs: %s" % pws_path)
 
+    base = os.path.basename(pws_path).lower()
+    is_crop = base.startswith("crop")
+    crop_bits = None
+    crop_meta = None
+    if is_crop:
+        if n_priv < 1:
+            raise ValueError("Crop.pws expected a crop-bit private wire")
+        region = crop_region
+        if region is None:
+            region = (0.2, 0.8, 0.2, 0.8)
+        if len(region) != 4:
+            raise ValueError("crop_region must be (x_start, x_end, y_start, y_end)")
+        crop_bits, w_blocks, h_blocks = build_crop_bit_mask(
+            n_copies, region[0], region[1], region[2], region[3], mb_width
+        )
+        crop_meta = {
+            "crop_region": [float(x) for x in region],
+            "mb_width": w_blocks,
+            "mb_height": h_blocks,
+            "kept_blocks": int(sum(crop_bits)),
+        }
+
     priv_rows = []
     full_rows = []
-    for _ in range(n_copies):
-        priv = [secrets.randbelow(value_max + 1) for _ in range(n_priv)]
+    for copy_idx in range(n_copies):
+        if is_crop:
+            priv = [secrets.randbelow(value_max + 1) for _ in range(n_priv - 1)]
+            priv.append(int(crop_bits[copy_idx]))
+        else:
+            priv = [secrets.randbelow(value_max + 1) for _ in range(n_priv)]
         priv_rows.append(priv)
         full = []
         vidx = 0
@@ -268,13 +388,16 @@ def prepare_random_circuit_io(
             pub = list(outs[:384])
             fh.write(" ".join(str(int(v) % Defs.prime) for v in pub) + "\n")
 
-    return {
+    out = {
         "input_path": input_path,
         "output_path": output_path,
         "n_copies": n_copies,
         "n_priv": n_priv,
         "pws": pws_path,
     }
+    if crop_meta is not None:
+        out.update(crop_meta)
+    return out
 
 
 def write_input_manifest(
@@ -318,10 +441,10 @@ def read_commit_manifest(path: Optional[str] = None) -> dict:
     with open(path, "r") as fh:
         manifest = json.load(fh)
 
-    if manifest.get("protocol") != PROTOCOL_ID:
+    if manifest.get("protocol") not in _PROTOCOL_ALIASES:
         raise ValueError(
-            "commitment manifest %s has protocol %r, expected %r"
-            % (path, manifest.get("protocol"), PROTOCOL_ID)
+            "commitment manifest %s has protocol %r, expected one of %r"
+            % (path, manifest.get("protocol"), sorted(_PROTOCOL_ALIASES))
         )
     if manifest.get("layout") != LAYOUT_ID:
         raise ValueError(
@@ -528,6 +651,26 @@ def orion_binary(phase: str, use_zk: bool) -> str:
     return "./linearPC_multi_%s" % phase
 
 
+def orion_mode(base_env: Optional[dict] = None) -> str:
+    """Return TRUEPIX_ORION_MODE: nizk (default) or interactive."""
+    env = os.environ if base_env is None else base_env
+    m = str(env.get("TRUEPIX_ORION_MODE", "nizk")).strip().lower()
+    if m in ("interactive", "interact"):
+        return "interactive"
+    return "nizk"
+
+
+def orion_single_core_env(base_env: Optional[dict] = None) -> dict:
+    """
+    OpenMP defaults to one worker per core. Each worker keeps a large stack
+    (~8MiB) that shows up in peak RSS. Force one thread so the Orion process
+    stays single-threaded.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    env["OMP_NUM_THREADS"] = "1"
+    return env
+
+
 def orion_env(
     copy_size: int = 384,
     const_idx: int = 384,
@@ -535,7 +678,7 @@ def orion_env(
     base_env: Optional[dict] = None,
 ) -> dict:
     """Environment shared by the Orion commit, prove and open binaries."""
-    env = dict(os.environ if base_env is None else base_env)
+    env = orion_single_core_env(base_env)
     env["TRUEPIX_PROTOCOL"] = PROTOCOL_ID
     env["TRUEPIX_COPY_SIZE"] = str(copy_size)
     env["TRUEPIX_CONST_IDX"] = str(const_idx)
@@ -546,4 +689,11 @@ def orion_env(
     env["TRUEPIX_MASK_SEED_FILE"] = os.path.abspath(
         os.environ.get("TRUEPIX_MASK_SEED_FILE", ORION_MASK_SEED_FILE)
     )
+    mode = orion_mode(env)
+    env["TRUEPIX_ORION_MODE"] = mode
+    if mode == "nizk":
+        env.setdefault(
+            "TRUEPIX_ORION_PROOF_FILE",
+            os.path.abspath(os.environ.get("TRUEPIX_ORION_PROOF_FILE", ORION_PROOF_FILE)),
+        )
     return env
